@@ -10,41 +10,68 @@ if (-not $appDirectory) {
     throw "Cannot find the RFBS application directory under: $projectRoot"
 }
 
-$pythonPath = ""
+$bundledPythonRoot = Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\python"
+$bundledPython = Join-Path $bundledPythonRoot "python.exe"
+$pythonCandidates = @()
+$projectPython = Join-Path $projectRoot ".python\python.exe"
+if (Test-Path -LiteralPath $projectPython) {
+    $pythonCandidates += $projectPython
+}
+if (Test-Path -LiteralPath $bundledPython) {
+    $pythonCandidates += $bundledPython
+}
 foreach ($commandName in @("python", "py")) {
     $candidate = Get-Command $commandName -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $candidate) {
-        continue
+    if ($candidate) {
+        $pythonCandidates += $candidate.Source
+    }
+}
+
+$pythonPath = ""
+foreach ($candidatePath in ($pythonCandidates | Select-Object -Unique)) {
+    if ($candidatePath -eq $bundledPython) {
+        $projectTclRoot = Join-Path $projectRoot ".tcl"
+        $env:TCL_LIBRARY = Join-Path $projectTclRoot "tcl8.6"
+        $env:TK_LIBRARY = Join-Path $projectTclRoot "tk8.6"
+    } else {
+        Remove-Item Env:TCL_LIBRARY -ErrorAction SilentlyContinue
+        Remove-Item Env:TK_LIBRARY -ErrorAction SilentlyContinue
     }
     try {
-        & $candidate.Source -B -c "import sys; print(sys.executable)" *> $null
+        & $candidatePath -B -c "import tkinter as tk; r=tk.Tk(); r.withdraw(); r.destroy()" *> $null
         $candidateUsable = $LASTEXITCODE -eq 0
     } catch {
         $candidateUsable = $false
     }
     if ($candidateUsable) {
-        $pythonPath = $candidate.Source
+        $pythonPath = $candidatePath
         break
     }
 }
-
-$bundledPythonRoot = Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\python"
-if (-not $pythonPath -and (Test-Path -LiteralPath (Join-Path $bundledPythonRoot "python.exe"))) {
-    $pythonPath = Join-Path $bundledPythonRoot "python.exe"
-    $env:TCL_LIBRARY = Join-Path $bundledPythonRoot "tcl\tcl8.6"
-    $env:TK_LIBRARY = Join-Path $bundledPythonRoot "tcl\tk8.6"
-}
 if (-not $pythonPath) {
-    throw "Python was not found. Install Python 3.10 or newer first."
+    throw "Python 3.10+ with Tkinter was not found. Install Python from python.org and include Tcl/Tk support."
 }
 
-$runtimeDependencies = Join-Path $appDirectory.FullName ".runtime-deps"
-if (Test-Path -LiteralPath $runtimeDependencies) {
-    $env:PYTHONPATH = if ($env:PYTHONPATH) {
-        $runtimeDependencies + [IO.Path]::PathSeparator + $env:PYTHONPATH
-    } else {
-        $runtimeDependencies
+$pythonTag = (& $pythonPath -B -c "import sys; print(f'py{sys.version_info.major}{sys.version_info.minor}')").Trim()
+$runtimeDependencies = Join-Path $appDirectory.FullName (".runtime-deps-" + $pythonTag)
+New-Item -ItemType Directory -Path $runtimeDependencies -Force | Out-Null
+$env:PYTHONPATH = if ($env:PYTHONPATH) {
+    $runtimeDependencies + [IO.Path]::PathSeparator + $env:PYTHONPATH
+} else {
+    $runtimeDependencies
+}
+
+& $pythonPath -B -c "import aiohttp, alibabacloud_oss_v2, openpyxl, pandas, PIL, playwright, requests" *> $null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "First launch: installing Python dependencies..." -ForegroundColor Cyan
+    & $pythonPath -m pip install --target $runtimeDependencies -r (Join-Path $projectRoot "requirements.txt")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Dependency installation failed. Check the network and run this launcher again."
     }
+}
+
+if (Test-Path -LiteralPath $runtimeDependencies) {
+    $env:PATH = $runtimeDependencies + [IO.Path]::PathSeparator + $env:PATH
 }
 
 if ($Test) {

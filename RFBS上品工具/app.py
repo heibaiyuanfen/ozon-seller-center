@@ -30,6 +30,7 @@ from services import (
 from product_ledger import upsert_product_ledger
 from runtime_paths import APP_DATA_DIR
 from wb_ui import WbUiMixin
+from amazon_source import download_amazon_images, scrape_amazon_product
 
 
 APP_DIR = APP_DATA_DIR
@@ -44,14 +45,14 @@ WB_JOB_PATH = APP_DIR / "wb_job.json"
 NO_BRAND_DICTIONARY_ID = 126745801
 NO_BRAND_DICTIONARY_VALUE = "Нет бренда"
 WORKSPACE_FIELD_KEYS = (
-    "listing_mode", "source_url", "supplier_1688_url", "title", "tags", "price", "old_price", "currency_code", "net_weight", "weight", "weight_unit",
+    "listing_mode", "source_url", "amazon_source", "supplier_1688_url", "title", "tags", "price", "old_price", "currency_code", "net_weight", "weight", "weight_unit",
     "depth", "width", "height", "dimension_unit", "vat", "offer_id", "model_name", "image_prompt",
     "watermark_path", "category_display", "category_id", "type_id", "warehouse_id", "stock",
     "purchase_cost", "label_fee", "target_roi", "sales_commission_percent",
     "advertising_percent", "cargo_loss_percent", "fbp_pricing",
 )
 JOB_INPUT_KEYS = (
-    "listing_mode", "ozon_shop_id", "ozon_shop_name", "source_url", "supplier_1688_url", "offer_id", "model_name", "price", "old_price", "net_weight", "weight",
+    "listing_mode", "ozon_shop_id", "ozon_shop_name", "source_url", "amazon_source", "amazon_generate_main", "supplier_1688_url", "offer_id", "model_name", "price", "old_price", "net_weight", "weight",
     "depth", "width", "height", "category_display", "category_id", "type_id",
     "warehouse_id", "stock", "watermark_path", "image_prompt", "currency_code",
     "weight_unit", "dimension_unit", "vat", "purchase_cost", "label_fee", "target_roi",
@@ -104,6 +105,7 @@ class RfbsListingApp(WbUiMixin):
         self.vars: dict[str, tk.StringVar] = {}
         self.job_form_vars: dict[str, tk.StringVar] = {}
         self.job_form_image_paths: list[str] = []
+        self.amazon_image_root = OUTPUT_DIR / "amazon-products"
         self.auto_jobs: dict[str, dict] = {}
         self.auto_job_order: list[str] = []
         self.auto_job_queue: queue.Queue[str] = queue.Queue()
@@ -309,21 +311,30 @@ class RfbsListingApp(WbUiMixin):
         )
         self._job_entry(tab, "型号名称（同名合并多变体）", "model_name", 2, 2)
         self._job_entry(tab, "1688 采购链接（可选）", "supplier_1688_url", 3, width=70)
-        ttk.Label(tab, text="本地成品图片").grid(row=3, column=2, sticky="w", padx=5, pady=4)
+        ttk.Label(tab, text="新品图片 / 亚马逊").grid(row=3, column=2, sticky="w", padx=5, pady=4)
         local_images = ttk.Frame(tab)
         local_images.grid(row=3, column=3, sticky="ew", padx=5, pady=4)
-        self.job_local_images_button = ttk.Button(
-            local_images, text="选择图片", command=self._select_job_local_images,
+        local_images.columnconfigure(2, weight=1)
+        self.job_amazon_source_entry = ttk.Entry(
+            local_images, textvariable=self._job_var("amazon_source"), width=18,
         )
-        self.job_local_images_button.pack(side=tk.LEFT)
+        self.job_amazon_source_entry.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+        self.job_amazon_fetch_button = ttk.Button(
+            local_images, text="获取亚马逊图片", command=lambda: self._run(self._fetch_amazon_images),
+        )
+        self.job_amazon_fetch_button.grid(row=1, column=2, sticky="w", padx=(5, 0), pady=(5, 0))
+        self.job_local_images_button = ttk.Button(
+            local_images, text="选择/调整图片", command=self._select_job_local_images,
+        )
+        self.job_local_images_button.grid(row=0, column=0, sticky="w")
         self.job_local_images_clear_button = ttk.Button(
             local_images, text="清空", command=self._clear_job_local_images,
         )
-        self.job_local_images_clear_button.pack(side=tk.LEFT, padx=(5, 8))
+        self.job_local_images_clear_button.grid(row=0, column=1, sticky="w", padx=(5, 8))
         self.job_local_images_status_var = tk.StringVar(value="跟卖模式无需选择")
         ttk.Label(
             local_images, textvariable=self.job_local_images_status_var, foreground="#245a8d",
-        ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ).grid(row=0, column=2, sticky="w")
         pricing_defaults = (
             ("purchase_cost", ""), ("label_fee", "2"), ("target_roi", "60"),
             ("sales_commission_percent", ""),
@@ -466,6 +477,13 @@ class RfbsListingApp(WbUiMixin):
             if len(unique_paths) >= 15:
                 break
         self.job_form_image_paths = unique_paths
+        amazon_root = str(self.amazon_image_root.resolve()).casefold()
+        from_amazon = bool(unique_paths) and all(
+            str(Path(path).resolve()).casefold().startswith(amazon_root + str(Path("/")))
+            or str(Path(path).resolve()).casefold().startswith(amazon_root + "\\")
+            for path in unique_paths
+        )
+        self._job_var("amazon_generate_main", "0").set("1" if from_amazon else "0")
         status = getattr(self, "job_local_images_status_var", None)
         if status is not None:
             if unique_paths:
@@ -476,12 +494,42 @@ class RfbsListingApp(WbUiMixin):
                 status.set("跟卖模式无需选择")
 
     def _select_job_local_images(self):
+        initial_dir = None
+        if self.job_form_image_paths:
+            initial_dir = str(Path(self.job_form_image_paths[0]).parent)
         paths = filedialog.askopenfilenames(
             title="选择本地新品图片（第 1 张为主图）",
             filetypes=[("图片", "*.jpg *.jpeg *.png *.webp")],
+            initialdir=initial_dir,
         )
         if paths:
             self._set_job_local_image_paths(paths)
+
+    def _fetch_amazon_images(self):
+        if not self._local_listing_enabled({
+            "listing_mode": self._job_var("listing_mode", "follow").get(),
+        }):
+            raise ValueError("亚马逊图片导入只适用于本地新品模式")
+        source = self._job_var("amazon_source").get().strip()
+        product = scrape_amazon_product(
+            source, timeout=180,
+            browser_profile_dir=APP_DIR / "amazon_browser_profile",
+        )
+        paths, output_dir = download_amazon_images(
+            product, self.amazon_image_root, limit=15, log_func=self._log,
+        )
+        self._ui_call(lambda: self._set_job_local_image_paths(paths))
+        self._log(
+            f"亚马逊 {product.asin} 已获取 {len(paths)} 张图片；"
+            f"每张按 01、02…编号，独立目录：{output_dir}"
+        )
+        self._ui_call(lambda: messagebox.showinfo(
+            "亚马逊图片获取完成",
+            f"ASIN：{product.asin}\n已获取 {len(paths)} 张图片并全部选中。\n"
+            "第 1 张将作为生图参考；如需调整，请点击“选择/调整图片”。\n"
+            f"独立目录：{output_dir}",
+        ))
+        return paths
 
     def _clear_job_local_images(self):
         self._set_job_local_image_paths([])
@@ -498,10 +546,14 @@ class RfbsListingApp(WbUiMixin):
             )
         if getattr(self, "work_offer_entry", None) is not None:
             self.work_offer_entry.state(["readonly"] if local_mode else ["!readonly"])
-        for button_name in ("job_local_images_button", "job_local_images_clear_button"):
+        for button_name in (
+            "job_local_images_button", "job_local_images_clear_button", "job_amazon_fetch_button",
+        ):
             button = getattr(self, button_name, None)
             if button is not None:
                 button.state(["!disabled"] if local_mode else ["disabled"])
+        if getattr(self, "job_amazon_source_entry", None) is not None:
+            self.job_amazon_source_entry.state(["!disabled"] if local_mode else ["disabled"])
         self._set_job_local_image_paths(getattr(self, "job_form_image_paths", []))
         if getattr(self, "product_source_entry", None) is not None:
             self.product_source_entry.state(["disabled"] if local_mode else ["!disabled"])
@@ -1692,6 +1744,8 @@ class RfbsListingApp(WbUiMixin):
         self.auto_job_queue.put(job_id)
         self._refresh_job_tree()
         self.job_form_vars["source_url"].set("")
+        self._job_var("amazon_source").set("")
+        self._job_var("amazon_generate_main", "0").set("0")
         self.job_form_vars["supplier_1688_url"].set("")
         self.job_form_vars["offer_id"].set(f"AUTO-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}")
         self.job_form_vars["model_name"].set("")
@@ -1874,11 +1928,19 @@ class RfbsListingApp(WbUiMixin):
             if stage < 3:
                 cancel_check()
                 if local_mode:
-                    self._set_auto_progress(3, f"{offer_id}：准备成品图片并按需添加水印")
-                    self._retry_step(
-                        "本地成品图片处理", self._prepare_local_images_for_upload,
-                        attempts=2, delay_seconds=2, cancel_check=cancel_check,
-                    )
+                    amazon_main = str((job.get("inputs") or {}).get("amazon_generate_main") or "0") == "1"
+                    if amazon_main:
+                        self._set_auto_progress(3, f"{offer_id}：生成 3:4 Ozon 亚马逊新品主图")
+                        self._retry_step(
+                            "亚马逊新品主图生成", self._generate_amazon_local_main,
+                            attempts=2, delay_seconds=4, cancel_check=cancel_check,
+                        )
+                    else:
+                        self._set_auto_progress(3, f"{offer_id}：准备成品图片并按需添加水印")
+                        self._retry_step(
+                            "本地成品图片处理", self._prepare_local_images_for_upload,
+                            attempts=2, delay_seconds=2, cancel_check=cancel_check,
+                        )
                 else:
                     self._set_auto_progress(3, f"{offer_id}：多图视觉分析、生成主图并加水印")
                     self._retry_step(
@@ -2783,6 +2845,14 @@ class RfbsListingApp(WbUiMixin):
             if self._local_listing_enabled(updated_inputs):
                 updated_inputs["source_url"] = ""
                 updated_inputs["local_image_paths"] = list(repair_local_image_paths)
+                if repair_local_images_changed[0]:
+                    amazon_root = str(self.amazon_image_root.resolve()).casefold() + "\\"
+                    updated_inputs["amazon_generate_main"] = "1" if (
+                        repair_local_image_paths and all(
+                            str(Path(path).resolve()).casefold().startswith(amazon_root)
+                            for path in repair_local_image_paths
+                        )
+                    ) else "0"
             else:
                 updated_inputs["local_image_paths"] = []
             selected_repair_shop_id = shop_id_by_display.get(repair_shop_display_var.get().strip(), "")
@@ -3004,11 +3074,19 @@ class RfbsListingApp(WbUiMixin):
             self._ui_call(lambda: None)
 
             if local_mode:
-                self._set_auto_progress(3, "3/9 正在准备成品图片并按需添加水印")
-                self._retry_step(
-                    "本地成品图片处理", self._prepare_local_images_for_upload,
-                    attempts=2, delay_seconds=2,
-                )
+                amazon_main = self._job_var("amazon_generate_main", "0").get() == "1"
+                if amazon_main:
+                    self._set_auto_progress(3, "3/9 正在生成精确 3:4 Ozon 亚马逊新品主图")
+                    self._retry_step(
+                        "亚马逊新品主图生成", self._generate_amazon_local_main,
+                        attempts=2, delay_seconds=4,
+                    )
+                else:
+                    self._set_auto_progress(3, "3/9 正在准备成品图片并按需添加水印")
+                    self._retry_step(
+                        "本地成品图片处理", self._prepare_local_images_for_upload,
+                        attempts=2, delay_seconds=2,
+                    )
             else:
                 self._set_auto_progress(3, "3/9 正在分析全部原图、生成新主图并给全部图片加水印")
                 self._retry_step("视觉分析/主图生成", self._generate_images, attempts=2, delay_seconds=4)
@@ -3296,6 +3374,53 @@ class RfbsListingApp(WbUiMixin):
         self._replace_images(paths)
         self.uploaded_urls = []
         self._log(message)
+
+    def _generate_amazon_local_main(self):
+        references = list(self.source_images or self.local_images)[:15]
+        if not references:
+            raise ValueError("请先从亚马逊获取并选择至少 1 张图片")
+        cfg = self._config()["image"]
+        service = ImageGenerationService(cfg["api_url"], cfg["api_key"], cfg["model"])
+        if service.api_url != cfg["api_url"].rstrip("/"):
+            self.root.after(0, lambda: self.vars["image_api_url"].set(service.api_url))
+        primary_index = self.primary_reference_index if self.primary_reference_index < len(references) else 0
+        analysis = self._ensure_vision_analysis()
+        poster_lines = [
+            str(line).strip() for line in analysis.get("poster_text_lines_ru", [])
+            if str(line).strip()
+        ][:4]
+        if not poster_lines:
+            poster_lines = build_ozon_poster_text_lines(self.vars["title"].get(), self.reference)
+        direction = "\n".join(filter(None, [
+            str(analysis.get("art_direction_en") or "").strip(),
+            self.vars["image_prompt"].get().strip(),
+            "Create an exact 3:4 portrait Ozon marketplace hero image optimized for high click-through rate. "
+            "Keep one complete, accurate product as the dominant focal point, with clean premium contrast, "
+            "mobile-readable Russian text, strong visual hierarchy and generous safe margins. No collage, "
+            "no duplicate product, no Amazon branding, badges, ratings, seller marks or invented features.",
+        ]))
+        prompt = build_ozon_main_image_prompt(direction, poster_lines)
+        generated = service.generate(
+            [references[primary_index]], prompt, 1,
+            str(OUTPUT_DIR / "amazon-generated-main"), exact_3_4=True,
+        )
+        attachments = [
+            path for index, path in enumerate(references) if index != primary_index
+        ][:14]
+        final_sources = [generated[0], *attachments]
+        watermark = self.vars["watermark_path"].get().strip()
+        if watermark:
+            if not Path(watermark).is_file():
+                raise FileNotFoundError("已填写的水印文件不存在；请重新选择或留空")
+            final_sources = WatermarkService.apply(
+                final_sources, watermark, str(OUTPUT_DIR / "amazon-ready-to-upload"),
+            )
+        self._replace_images(final_sources)
+        self.uploaded_urls = []
+        self._log(
+            f"亚马逊第 {primary_index + 1} 张图片已作为唯一主体参考，"
+            f"生成精确 3:4 Ozon 高点击主图；保留编号附图 {len(final_sources) - 1} 张"
+        )
 
     def _generate_copywriting(self):
         if self._active_listing_is_local():

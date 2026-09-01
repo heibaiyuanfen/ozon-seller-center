@@ -1497,7 +1497,10 @@ class ImageGenerationService:
         self.timeout = timeout
         self.session = session or requests.Session()
 
-    def generate(self, reference_paths: list[str], prompt: str, count: int, output_dir: str) -> list[str]:
+    def generate(
+        self, reference_paths: list[str], prompt: str, count: int, output_dir: str,
+        *, exact_3_4: bool = False,
+    ) -> list[str]:
         if not self.api_url or not self.api_key or not self.model:
             raise ValueError("请先填写生图 API 地址、密钥和模型")
         if not reference_paths:
@@ -1559,7 +1562,22 @@ class ImageGenerationService:
                 continue
             with Image.open(io.BytesIO(content)) as image:
                 target = output / f"generated_{int(time.time())}_{index}.jpg"
-                image.convert("RGB").save(target, "JPEG", quality=95)
+                rendered = image.convert("RGB")
+                if exact_3_4:
+                    # Ozon cover requested by the Amazon-new-product workflow:
+                    # exact 3:4 output without stretching the product.
+                    width, height = rendered.size
+                    if width * 4 <= height * 3:
+                        target_width = max(3, width - width % 3)
+                        target_height = target_width // 3 * 4
+                    else:
+                        target_height = max(4, height - height % 4)
+                        target_width = target_height // 4 * 3
+                    rendered = ImageOps.fit(
+                        rendered, (target_width, target_height),
+                        method=Image.Resampling.LANCZOS, centering=(0.5, 0.5),
+                    )
+                rendered.save(target, "JPEG", quality=95)
                 results.append(str(target))
         if not results:
             raise RuntimeError("生图接口没有返回可用图片")

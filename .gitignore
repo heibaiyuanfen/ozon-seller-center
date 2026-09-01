@@ -7,8 +7,12 @@ RFBS上品工具/*.db
 RFBS上品工具/输出/
 RFBS上品工具/browser_profile/
 RFBS上品工具/browser_profile_*/
+RFBS上品工具/amazon_browser_profile/
 RFBS上品工具/cache/
 RFBS上品工具/.runtime-deps/
+RFBS上品工具/.runtime-deps-*/
+.python/
+.tcl/
 __pycache__/
 *.pyc
 *.db
