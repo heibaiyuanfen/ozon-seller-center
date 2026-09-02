@@ -1504,6 +1504,100 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(shops[selected]["client_id"], "legacy-client")
         self.assertEqual(shops[selected]["api_key"], "legacy-key")
 
+    def test_multi_shop_product_expands_to_independent_shop_warehouse_jobs(self):
+        app = RfbsListingApp.__new__(RfbsListingApp)
+        app.ozon_shops = {
+            "shop-a": {"id": "shop-a", "name": "店铺A"},
+            "shop-b": {"id": "shop-b", "name": "店铺B"},
+        }
+        app.multi_shop_targets = {
+            "shop-a": {"warehouse_id": "1001", "warehouse_display": "仓库A | ID=1001"},
+            "shop-b": {"warehouse_id": "2002", "warehouse_display": "仓库B | ID=2002"},
+        }
+        expanded = app._expand_job_inputs_for_shops(
+            {"offer_id": "SAME-SKU", "source_url": "123456789"}, "group-1",
+        )
+        self.assertEqual(len(expanded), 2)
+        self.assertEqual(
+            [(item["ozon_shop_id"], item["warehouse_id"]) for item in expanded],
+            [("shop-a", "1001"), ("shop-b", "2002")],
+        )
+        self.assertEqual(
+            [item["offer_id"] for item in expanded], ["SAME-SKU-1", "SAME-SKU-2"],
+        )
+        self.assertEqual(len({item["offer_id"] for item in expanded}), 2)
+        self.assertEqual({item["product_group_id"] for item in expanded}, {"group-1"})
+        self.assertEqual([item["shop_variant_index"] for item in expanded], [0, 1])
+
+    def test_single_shop_keeps_base_offer_id_and_generator_is_unique(self):
+        app = RfbsListingApp.__new__(RfbsListingApp)
+        app.ozon_shops = {"shop-a": {"id": "shop-a", "name": "店铺A"}}
+        app.multi_shop_targets = {}
+        expanded = app._expand_job_inputs_for_shops({
+            "offer_id": "BASE-SKU", "ozon_shop_id": "shop-a", "warehouse_id": "1001",
+        }, "group-1")
+        self.assertEqual(expanded[0]["offer_id"], "BASE-SKU")
+        first = RfbsListingApp._new_offer_id()
+        second = RfbsListingApp._new_offer_id()
+        self.assertRegex(first, r"^AUTO-\d{8}-[A-F0-9]{6}$")
+        self.assertNotEqual(first, second)
+
+    def test_empty_offer_id_is_generated_automatically_from_form(self):
+        class Value:
+            def __init__(self, value=""):
+                self.value = str(value)
+            def get(self):
+                return self.value
+            def set(self, value):
+                self.value = str(value)
+
+        app = RfbsListingApp.__new__(RfbsListingApp)
+        app.job_form_vars = {"offer_id": Value("")}
+        app.vars = {}
+        app.category_by_display = {}
+        app.ozon_shops = {}
+        app.job_form_image_paths = []
+        values = app._job_inputs_from_form()
+        self.assertRegex(values["offer_id"], r"^AUTO-\d{8}-[A-F0-9]{6}$")
+        self.assertEqual(app.job_form_vars["offer_id"].get(), values["offer_id"])
+
+    def test_follow_shop_reuses_best_group_collection_checkpoint(self):
+        app = RfbsListingApp.__new__(RfbsListingApp)
+        app.auto_job_order = ["first", "partial", "current"]
+        app.auto_jobs = {
+            "first": {
+                "id": "first", "stage": 7,
+                "inputs": {"listing_mode": "follow", "product_group_id": "group-1"},
+                "state": {"reference": {"title": "shared"}},
+            },
+            "partial": {
+                "id": "partial", "stage": 1,
+                "inputs": {"listing_mode": "follow", "product_group_id": "group-1"},
+                "state": {"reference": {"title": "partial"}},
+            },
+            "current": {
+                "id": "current", "stage": 0,
+                "inputs": {"listing_mode": "follow", "product_group_id": "group-1"},
+                "state": {},
+            },
+        }
+        stage, state = app._shared_group_product_checkpoint(app.auto_jobs["current"])
+        self.assertEqual(stage, 2)
+        self.assertEqual(state["reference"]["title"], "shared")
+
+        local = {
+            "id": "local", "stage": 0,
+            "inputs": {"listing_mode": "local", "product_group_id": "group-1"},
+        }
+        self.assertIsNone(app._shared_group_product_checkpoint(local))
+
+    def test_multi_shop_main_image_directions_are_distinct(self):
+        first = RfbsListingApp._shop_main_image_direction({"shop_variant_index": 0})
+        second = RfbsListingApp._shop_main_image_direction({"shop_variant_index": 1})
+        self.assertNotEqual(first, second)
+        self.assertIn("variant 1", first)
+        self.assertIn("variant 2", second)
+
     def test_running_job_uses_its_bound_shop_even_if_current_selection_changes(self):
         class Value:
             def __init__(self, value):

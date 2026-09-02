@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import queue
 import re
@@ -106,6 +107,8 @@ class RfbsListingApp(WbUiMixin):
         self.job_form_vars: dict[str, tk.StringVar] = {}
         self.job_form_image_paths: list[str] = []
         self.amazon_image_root = OUTPUT_DIR / "amazon-products"
+        self.multi_shop_targets: dict[str, dict] = {}
+        self.multi_shop_warehouse_choices: dict[str, dict[str, dict]] = {}
         self.auto_jobs: dict[str, dict] = {}
         self.auto_job_order: list[str] = []
         self.auto_job_queue: queue.Queue[str] = queue.Queue()
@@ -137,6 +140,21 @@ class RfbsListingApp(WbUiMixin):
         value = tk.StringVar(value=default)
         self.job_form_vars[key] = value
         return value
+
+    @staticmethod
+    def _new_offer_id() -> str:
+        return f"AUTO-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+
+    def _generate_job_offer_id(self):
+        offer_id = self._new_offer_id()
+        self._job_var("offer_id").set(offer_id)
+        if getattr(self, "offer_id_hint_var", None) is not None:
+            target_count = max(1, len(getattr(self, "multi_shop_targets", {})))
+            hint = (
+                f"多店铺将使用 {offer_id}-1 至 {offer_id}-{target_count}"
+                if target_count > 1 else "已生成新货号"
+            )
+            self.offer_id_hint_var.set(hint)
 
     def _job_entry(self, parent, label, key, row, column=0, *, width=34, default=""):
         ttk.Label(parent, text=label).grid(row=row, column=column, sticky="w", padx=5, pady=4)
@@ -300,15 +318,36 @@ class RfbsListingApp(WbUiMixin):
         )
         self.work_source_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=4)
         ttk.Label(tab, text="上品店铺").grid(row=1, column=2, sticky="w", padx=5, pady=4)
+        shop_target_frame = ttk.Frame(tab)
+        shop_target_frame.grid(row=1, column=3, sticky="ew", padx=5, pady=4)
+        shop_target_frame.columnconfigure(0, weight=1)
         self.work_shop_combo = ttk.Combobox(
-            tab, textvariable=self._job_var("ozon_shop_display"), state="readonly", width=34,
+            shop_target_frame, textvariable=self._job_var("ozon_shop_display"), state="readonly", width=26,
         )
-        self.work_shop_combo.grid(row=1, column=3, sticky="ew", padx=5, pady=4)
+        self.work_shop_combo.grid(row=0, column=0, sticky="ew")
         self.work_shop_combo.bind("<<ComboboxSelected>>", lambda _event: self._work_shop_selected())
-        self.work_offer_entry = self._job_entry(
-            tab, "货号（Offer ID）", "offer_id", 2,
-            default=f"AUTO-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}",
+        ttk.Button(
+            shop_target_frame, text="多店铺/仓库", command=self._open_multi_shop_selector,
+        ).grid(row=0, column=1, padx=(6, 0))
+        self.multi_shop_summary_var = tk.StringVar(value="单店模式")
+        ttk.Label(
+            shop_target_frame, textvariable=self.multi_shop_summary_var, foreground="#245a8d",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        ttk.Label(tab, text="货号（Offer ID）").grid(row=2, column=0, sticky="w", padx=5, pady=4)
+        offer_frame = ttk.Frame(tab)
+        offer_frame.grid(row=2, column=1, sticky="ew", padx=5, pady=4)
+        offer_frame.columnconfigure(0, weight=1)
+        self.work_offer_entry = ttk.Entry(
+            offer_frame, textvariable=self._job_var("offer_id", self._new_offer_id()),
         )
+        self.work_offer_entry.grid(row=0, column=0, sticky="ew")
+        ttk.Button(
+            offer_frame, text="自动生成", command=self._generate_job_offer_id,
+        ).grid(row=0, column=1, padx=(6, 0))
+        self.offer_id_hint_var = tk.StringVar(value="多店铺模式会自动追加不同编号")
+        ttk.Label(
+            offer_frame, textvariable=self.offer_id_hint_var, foreground="#666",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
         self._job_entry(tab, "型号名称（同名合并多变体）", "model_name", 2, 2)
         self._job_entry(tab, "1688 采购链接（可选）", "supplier_1688_url", 3, width=70)
         ttk.Label(tab, text="新品图片 / 亚马逊").grid(row=3, column=2, sticky="w", padx=5, pady=4)
@@ -885,6 +924,10 @@ class RfbsListingApp(WbUiMixin):
         return f"{shop.get('name') or '未命名店铺'} | Client-Id={shop.get('client_id') or '未填写'}"
 
     def _refresh_ozon_shop_choices(self):
+        self.multi_shop_targets = {
+            shop_id: target for shop_id, target in getattr(self, "multi_shop_targets", {}).items()
+            if shop_id in self.ozon_shops
+        }
         self.ozon_shop_display_by_id = {
             shop_id: self._ozon_shop_display(shop) for shop_id, shop in self.ozon_shops.items()
         }
@@ -896,6 +939,11 @@ class RfbsListingApp(WbUiMixin):
             self.settings_shop_combo.configure(values=choices)
         if getattr(self, "work_shop_combo", None) is not None:
             self.work_shop_combo.configure(values=choices)
+        if getattr(self, "multi_shop_summary_var", None) is not None and self.multi_shop_targets:
+            self.multi_shop_summary_var.set(
+                "已选 " + str(len(self.multi_shop_targets)) + " 家："
+                + "、".join(self.ozon_shops[shop_id]["name"] for shop_id in self.multi_shop_targets)
+            )
 
     def _activate_ozon_shop(self, shop_id: str, *, sync_workbench: bool):
         shop = self.ozon_shops.get(str(shop_id or ""))
@@ -943,6 +991,11 @@ class RfbsListingApp(WbUiMixin):
         shop_id = self.ozon_shop_id_by_display.get(display, "")
         if not shop_id:
             return
+        self.multi_shop_targets = {}
+        if getattr(self, "multi_shop_summary_var", None) is not None:
+            self.multi_shop_summary_var.set("单店模式")
+        if getattr(self, "offer_id_hint_var", None) is not None:
+            self.offer_id_hint_var.set("单店直接使用当前货号")
         old_shop_id = self._job_var("ozon_shop_id").get().strip()
         shop = self.ozon_shops[shop_id]
         self._job_var("ozon_shop_id").set(shop_id)
@@ -951,6 +1004,199 @@ class RfbsListingApp(WbUiMixin):
             self._job_var("warehouse_id").set("")
             self._clear_warehouse_after_shop_change()
         self._activate_ozon_shop(shop_id, sync_workbench=False)
+
+    @staticmethod
+    def _warehouse_choice_mapping(warehouses: list[dict]) -> dict[str, dict]:
+        mapping: dict[str, dict] = {}
+        for item in warehouses:
+            warehouse_id = item.get("warehouse_id") or item.get("id")
+            if not warehouse_id:
+                continue
+            name = str(item.get("name") or item.get("warehouse_name") or warehouse_id)
+            scheme = "RFBS" if item.get("is_rfbs") is True else str(item.get("delivery_method") or "")
+            status = str(item.get("status") or "")
+            display = f"{name} | {scheme or '仓库'} | {status or '状态未知'} | ID={warehouse_id}"
+            mapping[display] = dict(item)
+        return mapping
+
+    def _open_multi_shop_selector(self):
+        if not self.ozon_shops:
+            messagebox.showerror("没有店铺", "请先在“服务配置”中保存至少一个 Ozon 店铺")
+            return
+        window = tk.Toplevel(self.root)
+        window.title("选择多个 Ozon 店铺及 RFBS 仓库")
+        window.geometry("900x560")
+        window.transient(self.root)
+        container = ttk.Frame(window, padding=12)
+        container.pack(fill=tk.BOTH, expand=True)
+        container.columnconfigure(0, weight=1)
+        container.rowconfigure(1, weight=1)
+        ttk.Label(
+            container,
+            text="选择需要上架的店铺，读取每家店铺的 API 仓库，并分别指定 RFBS 仓库。",
+            foreground="#245a8d",
+        ).grid(row=0, column=0, sticky="w", pady=(0, 8))
+        tree = ttk.Treeview(
+            container, columns=("selected", "shop", "client", "warehouse"),
+            show="headings", selectmode="browse", height=12,
+        )
+        for key, title, width in (
+            ("selected", "上架", 55), ("shop", "店铺", 170),
+            ("client", "Client-Id", 150), ("warehouse", "RFBS 仓库", 430),
+        ):
+            tree.heading(key, text=title)
+            tree.column(key, width=width, stretch=key == "warehouse")
+        tree.grid(row=1, column=0, sticky="nsew")
+        selected_ids = set(self.multi_shop_targets)
+        if not selected_ids:
+            current = self._job_var("ozon_shop_id").get().strip()
+            if current:
+                selected_ids.add(current)
+
+        def warehouse_text(shop_id: str) -> str:
+            return str((self.multi_shop_targets.get(shop_id) or {}).get("warehouse_display") or "尚未读取")
+
+        for shop_id, shop in self.ozon_shops.items():
+            tree.insert("", tk.END, iid=shop_id, values=(
+                "是" if shop_id in selected_ids else "否", shop.get("name", ""),
+                shop.get("client_id", ""), warehouse_text(shop_id),
+            ))
+
+        editor = ttk.LabelFrame(container, text="选中行的仓库", padding=8)
+        editor.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        editor.columnconfigure(0, weight=1)
+        warehouse_var = tk.StringVar()
+        warehouse_combo = ttk.Combobox(editor, textvariable=warehouse_var, state="readonly")
+        warehouse_combo.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+
+        def refresh_editor(_event=None):
+            selection = tree.selection()
+            shop_id = selection[0] if selection else ""
+            choices = self.multi_shop_warehouse_choices.get(shop_id, {})
+            warehouse_combo.configure(values=list(choices))
+            current = str((self.multi_shop_targets.get(shop_id) or {}).get("warehouse_display") or "")
+            warehouse_var.set(current if current in choices else "")
+
+        tree.bind("<<TreeviewSelect>>", refresh_editor)
+
+        def toggle_selected():
+            selection = tree.selection()
+            if not selection:
+                return
+            shop_id = selection[0]
+            values = list(tree.item(shop_id, "values"))
+            if shop_id in selected_ids:
+                selected_ids.remove(shop_id)
+                values[0] = "否"
+            else:
+                selected_ids.add(shop_id)
+                values[0] = "是"
+            tree.item(shop_id, values=values)
+
+        def apply_warehouse():
+            selection = tree.selection()
+            if not selection:
+                messagebox.showerror("未选择店铺", "请先选择一行店铺", parent=window)
+                return
+            shop_id = selection[0]
+            display = warehouse_var.get().strip()
+            item = self.multi_shop_warehouse_choices.get(shop_id, {}).get(display)
+            warehouse_id = (item or {}).get("warehouse_id") or (item or {}).get("id")
+            if not warehouse_id:
+                messagebox.showerror("未选择仓库", "请先读取并选择该店铺的 RFBS 仓库", parent=window)
+                return
+            target = dict(self.multi_shop_targets.get(shop_id) or {})
+            target.update({"warehouse_id": str(warehouse_id), "warehouse_display": display})
+            self.multi_shop_targets[shop_id] = target
+            values = list(tree.item(shop_id, "values"))
+            values[3] = display
+            tree.item(shop_id, values=values)
+
+        def load_selected_warehouses():
+            ids = [shop_id for shop_id in self.ozon_shops if shop_id in selected_ids]
+            if not ids:
+                self._ui_call(lambda: messagebox.showerror(
+                    "未选择店铺", "请至少选择一个店铺", parent=window,
+                ))
+                return
+            loaded: dict[str, dict[str, dict]] = {}
+            for shop_id in ids:
+                shop = self.ozon_shops[shop_id]
+                if not str(shop.get("client_id") or "").strip() or not str(shop.get("api_key") or "").strip():
+                    raise ValueError(f"店铺“{shop.get('name') or shop_id}”缺少 Client-Id 或 Api-Key")
+                loaded[shop_id] = self._warehouse_choice_mapping(self._api(shop_id).warehouses())
+                if not loaded[shop_id]:
+                    raise ValueError(f"店铺“{shop.get('name') or shop_id}”未读取到可用仓库")
+
+            def apply_loaded():
+                if not window.winfo_exists():
+                    return
+                for shop_id, choices in loaded.items():
+                    self.multi_shop_warehouse_choices[shop_id] = choices
+                    current = self.multi_shop_targets.get(shop_id) or {}
+                    current_display = str(current.get("warehouse_display") or "")
+                    if current_display not in choices:
+                        preferred = next(
+                            (display for display, item in choices.items() if item.get("is_rfbs") is True),
+                            next(iter(choices)),
+                        )
+                        item = choices[preferred]
+                        current = {
+                            "warehouse_id": str(item.get("warehouse_id") or item.get("id")),
+                            "warehouse_display": preferred,
+                        }
+                        self.multi_shop_targets[shop_id] = current
+                    values = list(tree.item(shop_id, "values"))
+                    values[3] = current["warehouse_display"]
+                    tree.item(shop_id, values=values)
+                refresh_editor()
+            self._ui_call(apply_loaded)
+
+        def confirm_targets():
+            ids = [shop_id for shop_id in self.ozon_shops if shop_id in selected_ids]
+            if not ids:
+                messagebox.showerror("未选择店铺", "请至少选择一个店铺", parent=window)
+                return
+            missing = [
+                self.ozon_shops[shop_id].get("name") or shop_id for shop_id in ids
+                if not str((self.multi_shop_targets.get(shop_id) or {}).get("warehouse_id") or "").strip()
+            ]
+            if missing:
+                messagebox.showerror(
+                    "仓库未完成", "请先读取并选择这些店铺的仓库：" + "、".join(missing), parent=window,
+                )
+                return
+            self.multi_shop_targets = {shop_id: dict(self.multi_shop_targets[shop_id]) for shop_id in ids}
+            first_id = ids[0]
+            first = self.ozon_shops[first_id]
+            self._job_var("ozon_shop_id").set(first_id)
+            self._job_var("ozon_shop_name").set(first["name"])
+            self._job_var("ozon_shop_display").set(self.ozon_shop_display_by_id[first_id])
+            self._job_var("warehouse_id").set(self.multi_shop_targets[first_id]["warehouse_id"])
+            self.multi_shop_summary_var.set(
+                "已选 " + str(len(ids)) + " 家：" + "、".join(self.ozon_shops[shop_id]["name"] for shop_id in ids)
+            )
+            base_offer = self._job_var("offer_id").get().strip()
+            if getattr(self, "offer_id_hint_var", None) is not None:
+                self.offer_id_hint_var.set(
+                    f"实际货号：{base_offer}-1 至 {base_offer}-{len(ids)}"
+                    if len(ids) > 1 and base_offer else "单店直接使用当前货号"
+                )
+            window.destroy()
+
+        buttons = ttk.Frame(editor)
+        buttons.grid(row=0, column=1, sticky="e")
+        ttk.Button(buttons, text="切换是否上架", command=toggle_selected).pack(side=tk.LEFT, padx=3)
+        ttk.Button(
+            buttons, text="读取所选店铺仓库",
+            command=lambda: self._run(load_selected_warehouses),
+        ).pack(side=tk.LEFT, padx=3)
+        ttk.Button(buttons, text="采用此仓库", command=apply_warehouse).pack(side=tk.LEFT, padx=3)
+        ttk.Button(buttons, text="确认", command=confirm_targets).pack(side=tk.LEFT, padx=(12, 3))
+        first_item = tree.get_children()
+        if first_item:
+            tree.selection_set(first_item[0])
+            refresh_editor()
 
     def _new_ozon_shop(self):
         for key in (
@@ -1470,6 +1716,47 @@ class RfbsListingApp(WbUiMixin):
             self.work_category_id_label.configure(text="尚未选择实时类目")
         return None
 
+    def _job_shop_targets(self, base_inputs: dict) -> list[dict]:
+        targets = []
+        configured = getattr(self, "multi_shop_targets", {})
+        if configured:
+            for shop_id in self.ozon_shops:
+                target = configured.get(shop_id)
+                if not target:
+                    continue
+                shop = self.ozon_shops[shop_id]
+                targets.append({
+                    "ozon_shop_id": shop_id,
+                    "ozon_shop_name": shop.get("name") or shop_id,
+                    "warehouse_id": str(target.get("warehouse_id") or "").strip(),
+                    "warehouse_display": str(target.get("warehouse_display") or "").strip(),
+                })
+        if targets:
+            return targets
+        shop_id = str(base_inputs.get("ozon_shop_id") or "").strip()
+        shop = self.ozon_shops.get(shop_id, {})
+        return [{
+            "ozon_shop_id": shop_id,
+            "ozon_shop_name": shop.get("name") or str(base_inputs.get("ozon_shop_name") or ""),
+            "warehouse_id": str(base_inputs.get("warehouse_id") or "").strip(),
+            "warehouse_display": "",
+        }]
+
+    def _expand_job_inputs_for_shops(self, base_inputs: dict, group_id: str) -> list[dict]:
+        targets = self._job_shop_targets(base_inputs)
+        base_offer_id = str(base_inputs.get("offer_id") or "").strip()
+        expanded = []
+        for variant_index, target in enumerate(targets):
+            inputs = dict(base_inputs)
+            inputs.update(target)
+            if len(targets) > 1 and base_offer_id:
+                suffix = f"-{variant_index + 1}"
+                inputs["offer_id"] = base_offer_id[:100 - len(suffix)].rstrip("-") + suffix
+            inputs["product_group_id"] = str(group_id)
+            inputs["shop_variant_index"] = variant_index
+            expanded.append(inputs)
+        return expanded
+
     def _job_inputs_from_form(self) -> dict:
         values = {}
         for key in JOB_INPUT_KEYS:
@@ -1479,6 +1766,12 @@ class RfbsListingApp(WbUiMixin):
                 values[key] = self.vars[key].get().strip()
             else:
                 values[key] = ""
+        if not str(values.get("offer_id") or "").strip():
+            values["offer_id"] = self._new_offer_id()
+            if "offer_id" in self.job_form_vars:
+                self.job_form_vars["offer_id"].set(values["offer_id"])
+            if getattr(self, "offer_id_hint_var", None) is not None:
+                self.offer_id_hint_var.set("检测到空货号，已自动生成")
         category = self.category_by_display.get(values.get("category_display", ""))
         if category:
             values["category_id"] = str(category["description_category_id"])
@@ -1696,18 +1989,28 @@ class RfbsListingApp(WbUiMixin):
 
     def _enqueue_job_from_form(self):
         try:
-            inputs = self._job_inputs_from_form()
-            category = self._validate_job_inputs(inputs)
+            base_inputs = self._job_inputs_from_form()
+            category = None
+            group_id = time.strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
+            expanded_inputs = self._expand_job_inputs_for_shops(base_inputs, group_id)
+            for inputs in expanded_inputs:
+                category = self._validate_job_inputs(inputs)
         except Exception as error:
             messagebox.showerror("录入内容不完整", str(error))
             return
+        inputs = expanded_inputs[0]
         source_summary = (
             f"本地图片 {len(inputs.get('local_image_paths') or [])} 张"
             if self._local_listing_enabled(inputs) else inputs["source_url"]
         )
+        shop_lines = "\n".join(
+            f"  {index}. {item['ozon_shop_name']} / 货号 {item['offer_id']} / "
+            f"仓库 {item['warehouse_id']} / 独立主图方案 {index}"
+            for index, item in enumerate(expanded_inputs, start=1)
+        )
         summary = (
             f"上品模式：{'本地新品' if self._local_listing_enabled(inputs) else '跟卖'}\n"
-            f"上品店铺：{inputs['ozon_shop_name']}\n货号：{inputs['offer_id']}\n"
+            f"上品店铺：共 {len(expanded_inputs)} 家\n{shop_lines}\n货号：{inputs['offer_id']}\n"
             f"商品来源：{source_summary}\n"
             f"1688 采购链接：{inputs['supplier_1688_url'] or '未填写'}\n"
             f"型号名称：{inputs['model_name']}\n售价：{inputs['price']} RUB\n"
@@ -1719,39 +2022,46 @@ class RfbsListingApp(WbUiMixin):
         )
         if not messagebox.askyesno("加入自动上架队列", summary):
             return
-        job_id = time.strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
-        if self._local_listing_enabled(inputs):
-            try:
-                inputs["local_image_paths"] = self._snapshot_local_job_images(
-                    inputs.get("local_image_paths") or [], inputs["offer_id"], job_id,
-                )
-            except Exception as error:
-                messagebox.showerror("本地图片保存失败", str(error))
-                return
         now = time.strftime("%Y-%m-%d %H:%M:%S")
-        job = {
-            "id": job_id, "created_at": now, "updated_at": now,
-            "status": "queued", "stage": 0, "failed_stage": 0,
-            "inputs": inputs, "state": {}, "error": "", "message": "等待运行",
-            "task_id": 0, "import_completed": False, "stock_completed": False,
-            "ledger_completed": False,
-            "cancel_requested": False,
-        }
+        jobs = []
+        for inputs in expanded_inputs:
+            job_id = group_id + "-" + uuid.uuid4().hex[:6]
+            if self._local_listing_enabled(inputs):
+                try:
+                    inputs["local_image_paths"] = self._snapshot_local_job_images(
+                        inputs.get("local_image_paths") or [], inputs["offer_id"], job_id,
+                    )
+                except Exception as error:
+                    messagebox.showerror("本地图片保存失败", str(error))
+                    return
+            jobs.append({
+                "id": job_id, "created_at": now, "updated_at": now,
+                "status": "queued", "stage": 0, "failed_stage": 0,
+                "inputs": inputs, "state": {}, "error": "", "message": "等待运行",
+                "task_id": 0, "import_completed": False, "stock_completed": False,
+                "ledger_completed": False, "cancel_requested": False,
+            })
         with self.auto_job_lock:
-            self.auto_jobs[job_id] = job
-            self.auto_job_order.append(job_id)
+            for job in jobs:
+                self.auto_jobs[job["id"]] = job
+                self.auto_job_order.append(job["id"])
             self._save_auto_jobs()
-        self.auto_job_queue.put(job_id)
+        for job in jobs:
+            self.auto_job_queue.put(job["id"])
         self._refresh_job_tree()
         self.job_form_vars["source_url"].set("")
         self._job_var("amazon_source").set("")
         self._job_var("amazon_generate_main", "0").set("0")
         self.job_form_vars["supplier_1688_url"].set("")
-        self.job_form_vars["offer_id"].set(f"AUTO-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}")
+        self.job_form_vars["offer_id"].set(self._new_offer_id())
+        if getattr(self, "offer_id_hint_var", None) is not None:
+            self.offer_id_hint_var.set("已为下一件商品生成新货号")
         self.job_form_vars["model_name"].set("")
         if self._local_listing_enabled(inputs):
             self._clear_job_local_images()
-        self.auto_status_var.set(f"已加入 {inputs['offer_id']}；现在可以填写下一件商品")
+        self.auto_status_var.set(
+            f"已将 {inputs['offer_id']} 展开为 {len(jobs)} 个店铺任务；现在可以填写下一件商品"
+        )
         self._start_auto_job_worker()
 
     def _start_auto_job_worker(self):
@@ -1863,6 +2173,51 @@ class RfbsListingApp(WbUiMixin):
             self.category_combo.set(display)
         self._ui_call(apply)
 
+    def _shared_group_product_checkpoint(self, job: dict) -> tuple[int, dict] | None:
+        inputs = job.get("inputs") if isinstance(job.get("inputs"), dict) else {}
+        group_id = str(inputs.get("product_group_id") or "").strip()
+        if not group_id or self._local_listing_enabled(inputs):
+            return None
+        candidates = []
+        for other_id in self.auto_job_order:
+            if other_id == job.get("id"):
+                continue
+            other = self.auto_jobs.get(other_id, {})
+            other_inputs = other.get("inputs") if isinstance(other.get("inputs"), dict) else {}
+            if str(other_inputs.get("product_group_id") or "").strip() != group_id:
+                continue
+            shared_stage = min(int(other.get("stage") or 0), 2)
+            state = other.get("state") if isinstance(other.get("state"), dict) else {}
+            if shared_stage >= 1 and state:
+                candidates.append((shared_stage, state))
+        return max(candidates, key=lambda item: item[0]) if candidates else None
+
+    def _reuse_group_product_checkpoint(self, job: dict) -> int:
+        checkpoint = self._shared_group_product_checkpoint(job)
+        if not checkpoint:
+            return 0
+        shared_stage, shared_state = checkpoint
+        inputs = job.get("inputs") if isinstance(job.get("inputs"), dict) else {}
+
+        def apply():
+            self._restore_workspace_payload(shared_state)
+            for key, value in inputs.items():
+                if key in self.vars:
+                    self.vars[key].set(str(value))
+            shop_id = str(inputs.get("ozon_shop_id") or "")
+            if shop_id:
+                self._activate_ozon_shop(shop_id, sync_workbench=False)
+            self.category_combo.set(str(inputs.get("category_display") or ""))
+
+        self._ui_call(apply)
+        message = (
+            "已复用同产品批次的采集、原图和文案，跳过重复采集"
+            if shared_stage >= 2 else "已复用同产品批次的采集和原图，跳过重复采集"
+        )
+        self._checkpoint_auto_job(job, shared_stage, message)
+        self._log(f"{inputs.get('ozon_shop_name') or '后续店铺'}：{message}")
+        return shared_stage
+
     def _checkpoint_auto_job(self, job: dict, stage: int, message: str):
         job["stage"] = int(stage)
         job["message"] = message
@@ -1895,6 +2250,14 @@ class RfbsListingApp(WbUiMixin):
         local_mode = self._local_listing_enabled(job.get("inputs") or {})
         self.auto_pipeline_running = True
         try:
+            if not local_mode and stage < 2:
+                reused_stage = self._reuse_group_product_checkpoint(job)
+                if reused_stage > stage:
+                    stage = reused_stage
+                    self._set_auto_progress(
+                        stage,
+                        f"{offer_id}：已复用同产品采集结果，继续店铺独立主图和上架",
+                    )
             if stage < 1:
                 cancel_check()
                 if local_mode:
@@ -3305,6 +3668,47 @@ class RfbsListingApp(WbUiMixin):
             + (" | ".join(result.get("poster_text_lines_ru", [])) or "未返回可用俄文文字，将使用页面事实兜底")
         )
 
+    def _active_job_inputs(self) -> dict:
+        job = self.auto_jobs.get(str(getattr(self, "active_job_id", "") or ""), {})
+        inputs = job.get("inputs") if isinstance(job.get("inputs"), dict) else {}
+        return inputs
+
+    @staticmethod
+    def _shop_main_image_direction(inputs: dict) -> str:
+        directions = (
+            "Use a straight-on centered composition with a bright neutral background and restrained geometric props.",
+            "Use a three-quarter view with a distinct asymmetrical composition, soft side lighting, and a clean contextual surface.",
+            "Use a slightly elevated camera angle, generous negative space, and a contrasting cool-toned marketplace setting.",
+            "Use a low eye-level camera, warm natural side light, and a minimal lifestyle context without duplicating the reference layout.",
+            "Use a close product-forward crop with diagonal visual flow and a crisp high-key studio environment.",
+            "Use a wider composition with the product offset from center, layered depth, and a different prop arrangement.",
+        )
+        try:
+            index = int(inputs.get("shop_variant_index") or 0)
+        except (TypeError, ValueError):
+            index = 0
+        return directions[index % len(directions)] + f" This is storefront cover variant {index + 1}."
+
+    def _existing_group_main_hashes(self, inputs: dict) -> set[str]:
+        group_id = str(inputs.get("product_group_id") or "").strip()
+        if not group_id:
+            return set()
+        hashes = set()
+        for job_id, job in self.auto_jobs.items():
+            if job_id == self.active_job_id:
+                continue
+            other_inputs = job.get("inputs") if isinstance(job.get("inputs"), dict) else {}
+            if str(other_inputs.get("product_group_id") or "") != group_id:
+                continue
+            state = job.get("state") if isinstance(job.get("state"), dict) else {}
+            paths = state.get("local_images") if isinstance(state.get("local_images"), list) else []
+            if not paths:
+                continue
+            path = Path(str(paths[0]))
+            if path.is_file():
+                hashes.add(hashlib.sha256(path.read_bytes()).hexdigest())
+        return hashes
+
     def _generate_images(self):
         references = self.source_images or self.local_images
         if not references:
@@ -3329,6 +3733,7 @@ class RfbsListingApp(WbUiMixin):
         directions = [
             str(analysis.get("art_direction_en") or "").strip(),
             self.vars["image_prompt"].get().strip(),
+            self._shop_main_image_direction(self._active_job_inputs()),
         ]
         prompt = build_ozon_main_image_prompt(
             "\n".join(value for value in directions if value), poster_lines,
@@ -3336,13 +3741,31 @@ class RfbsListingApp(WbUiMixin):
         # As in the reference generator, the SKU cover receives exactly one
         # product-authority image.  Multiple uploads encourage variant mixing
         # and collage layouts; the remaining originals stay as attachments.
-        generated = service.generate([primary_reference], prompt, 1, str(OUTPUT_DIR / "generated-main"))
+        active_inputs = self._active_job_inputs()
+        safe_group = re.sub(
+            r"[^A-Za-z0-9._-]+", "_", str(active_inputs.get("product_group_id") or "manual")
+        ).strip("._-") or "manual"
+        safe_shop = re.sub(
+            r"[^A-Za-z0-9._-]+", "_", str(active_inputs.get("ozon_shop_id") or "single")
+        ).strip("._-") or "single"
+        output_dir = OUTPUT_DIR / "generated-main" / safe_group / safe_shop
+        generated = service.generate([primary_reference], prompt, 1, str(output_dir))
+        existing_hashes = self._existing_group_main_hashes(active_inputs)
+        generated_hash = hashlib.sha256(Path(generated[0]).read_bytes()).hexdigest()
+        if generated_hash in existing_hashes:
+            retry_prompt = prompt + " Create a visibly different camera angle and layout from every earlier storefront cover."
+            generated = service.generate([primary_reference], retry_prompt, 1, str(output_dir / "unique-retry"))
+            generated_hash = hashlib.sha256(Path(generated[0]).read_bytes()).hexdigest()
+            if generated_hash in existing_hashes:
+                raise RuntimeError("生图服务连续返回相同主图；为避免多店铺主图重复，任务已停止，请重试")
         attachments = [
             path for index, path in enumerate(references)
             if index != primary_index
         ][:14]
         final_sources = [generated[0], *attachments]
-        paths = WatermarkService.apply(final_sources, watermark, str(OUTPUT_DIR / "ready-to-upload"))
+        paths = WatermarkService.apply(
+            final_sources, watermark, str(OUTPUT_DIR / "ready-to-upload" / safe_group / safe_shop),
+        )
         self._replace_images(paths)
         self.uploaded_urls = []
         self._log(
