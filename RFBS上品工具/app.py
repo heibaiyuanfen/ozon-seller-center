@@ -31,7 +31,9 @@ from services import (
 from product_ledger import upsert_product_ledger
 from runtime_paths import APP_DATA_DIR
 from wb_ui import WbUiMixin
+from mercadolibre.ui import MercadoLibrePanel
 from amazon_source import download_amazon_images, scrape_amazon_product
+from seerfar_import import MAPPING_FIELDS, load_seerfar_workbook, mapping_payload, merge_product_mappings
 
 
 APP_DIR = APP_DATA_DIR
@@ -42,6 +44,7 @@ DICTIONARY_CACHE_DIR = APP_DIR / "cache" / "ozon-dictionaries"
 CATEGORY_CACHE_PATH = APP_DIR / "cache" / "ozon-categories.json"
 AUTO_JOBS_PATH = APP_DIR / "auto_jobs.json"
 PRODUCT_LEDGER_PATH = APP_DIR / "产品台账.xlsx"
+PRODUCT_POOL_PATH = APP_DIR / "选品池.json"
 WB_JOB_PATH = APP_DIR / "wb_job.json"
 NO_BRAND_DICTIONARY_ID = 126745801
 NO_BRAND_DICTIONARY_VALUE = "Нет бренда"
@@ -73,7 +76,7 @@ class RfbsListingApp(WbUiMixin):
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Ozon / Wildberries 上品工具")
+        self.root.title("Ozon / Wildberries / 美客多 上品工具")
         self.root.geometry("1180x900")
         self.root.minsize(980, 760)
         self.log_queue: queue.Queue[str] = queue.Queue()
@@ -107,6 +110,8 @@ class RfbsListingApp(WbUiMixin):
         self.job_form_vars: dict[str, tk.StringVar] = {}
         self.job_form_image_paths: list[str] = []
         self.amazon_image_root = OUTPUT_DIR / "amazon-products"
+        self.product_pool_products: list[dict] = []
+        self.product_pool_source_path = ""
         self.multi_shop_targets: dict[str, dict] = {}
         self.multi_shop_warehouse_choices: dict[str, dict[str, dict]] = {}
         self.auto_jobs: dict[str, dict] = {}
@@ -123,6 +128,7 @@ class RfbsListingApp(WbUiMixin):
         self._restore_workspace()
         self._initialize_job_form_from_workspace()
         self._load_auto_jobs()
+        self._load_product_pool()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(100, self._poll_log)
         self.root.after(15000, self._autosave_workspace)
@@ -273,24 +279,282 @@ class RfbsListingApp(WbUiMixin):
     def _build(self):
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.product_pool_tab = ttk.Frame(self.notebook, padding=12)
         self.workbench_tab = ttk.Frame(self.notebook, padding=12)
         self.settings_tab = ttk.Frame(self.notebook, padding=12)
         self.product_tab = ttk.Frame(self.notebook, padding=12)
         self.attributes_tab = ttk.Frame(self.notebook, padding=12)
         self.execute_tab = ttk.Frame(self.notebook, padding=12)
         self.wb_tab = ttk.Frame(self.notebook, padding=12)
-        self.notebook.add(self.workbench_tab, text="1. 自动工作台")
-        self.notebook.add(self.settings_tab, text="2. 服务配置")
-        self.notebook.add(self.product_tab, text="3. 商品与图片")
-        self.notebook.add(self.attributes_tab, text="4. 类目与属性")
-        self.notebook.add(self.execute_tab, text="5. 草稿与上架")
-        self.notebook.add(self.wb_tab, text="6. WB 上架")
+        self.notebook.add(self.product_pool_tab, text="1. Excel 选品池")
+        self.notebook.add(self.workbench_tab, text="2. 自动工作台")
+        self.notebook.add(self.settings_tab, text="3. 服务配置")
+        self.notebook.add(self.product_tab, text="4. 商品与图片")
+        self.notebook.add(self.attributes_tab, text="5. 类目与属性")
+        self.notebook.add(self.execute_tab, text="6. 草稿与上架")
+        self.notebook.add(self.wb_tab, text="7. WB 上架")
+        self.mercadolibre_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.mercadolibre_tab, text="8. 美客多（独立）")
+        try:
+            self.mercadolibre_panel = MercadoLibrePanel(self.mercadolibre_tab, APP_DIR / "mercadolibre-data")
+            self.mercadolibre_panel.pack(fill=tk.BOTH, expand=True)
+        except (OSError, ValueError) as error:
+            # An unreadable isolated workspace must not prevent other platforms opening.
+            for child in self.mercadolibre_tab.winfo_children():
+                child.destroy()
+            ttk.Label(self.mercadolibre_tab, text=f"美客多工作区暂不可用：{error}", wraplength=800).pack(padx=20, pady=20)
+        self._build_product_pool()
         self._build_workbench()
         self._build_settings()
         self._build_product()
         self._build_attributes()
         self._build_execute()
         self._build_wb()
+
+    def _build_product_pool(self):
+        tab = self.product_pool_tab
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(3, weight=1)
+        ttk.Label(
+            tab, text="Seerfar Excel 选品池", font=("Microsoft YaHei UI", 13, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            tab,
+            text="导入选品数据，为每个商品保存采购链接、货号、售价及物流参数，再载入自动工作台完成上架。",
+            foreground="#555",
+        ).grid(row=1, column=0, sticky="w", pady=(4, 10))
+        controls = ttk.Frame(tab)
+        controls.grid(row=2, column=0, sticky="ew", pady=(0, 8))
+        controls.columnconfigure(5, weight=1)
+        ttk.Button(controls, text="导入 Seerfar Excel", command=self._choose_product_pool_excel).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(controls, text="编辑选中产品", command=self._edit_selected_pool_product).grid(row=0, column=1, padx=6)
+        ttk.Button(controls, text="载入自动工作台", command=self._load_selected_pool_product).grid(row=0, column=2, padx=6)
+        ttk.Label(controls, text="搜索").grid(row=0, column=3, padx=(18, 4))
+        self.product_pool_search_var = tk.StringVar()
+        search = ttk.Entry(controls, textvariable=self.product_pool_search_var, width=26)
+        search.grid(row=0, column=4, sticky="ew")
+        search.bind("<KeyRelease>", lambda _event: self._refresh_product_pool_tree())
+        self.product_pool_status_var = tk.StringVar(value="尚未导入 Excel")
+        ttk.Label(controls, textvariable=self.product_pool_status_var, foreground="#245a8d").grid(
+            row=0, column=5, sticky="e", padx=(12, 0),
+        )
+        filters = ttk.Frame(controls)
+        filters.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(8, 0))
+        ttk.Label(filters, text="履约模式").pack(side=tk.LEFT)
+        self.product_pool_fulfillment_var = tk.StringVar(value="全部履约模式")
+        self.product_pool_fulfillment_combo = ttk.Combobox(
+            filters, textvariable=self.product_pool_fulfillment_var,
+            values=("全部履约模式",), state="readonly", width=18,
+        )
+        self.product_pool_fulfillment_combo.pack(side=tk.LEFT, padx=(6, 20))
+        self.product_pool_fulfillment_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_product_pool_tree())
+        ttk.Label(filters, text="排序").pack(side=tk.LEFT)
+        self.product_pool_sort_var = tk.StringVar(value="原表顺序")
+        sort_combo = ttk.Combobox(
+            filters, textvariable=self.product_pool_sort_var,
+            values=("原表顺序", "销量从高到低", "销量从低到高"), state="readonly", width=18,
+        )
+        sort_combo.pack(side=tk.LEFT, padx=6)
+        sort_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_product_pool_tree())
+        frame = ttk.Frame(tab)
+        frame.grid(row=3, column=0, sticky="nsew")
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+        columns = ("no", "title", "sku", "market_price", "sales", "fulfillment", "supplier", "offer", "price", "status")
+        self.product_pool_tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+        for key, title, width in (
+            ("no", "序号", 55), ("title", "商品标题", 310), ("sku", "Ozon SKU", 105),
+            ("market_price", "市场价", 75), ("sales", "销量", 75), ("fulfillment", "履约", 65),
+            ("supplier", "采购链接", 120), ("offer", "货号", 115), ("price", "上架价", 75),
+            ("status", "匹配状态", 85),
+        ):
+            self.product_pool_tree.heading(key, text=title)
+            self.product_pool_tree.column(key, width=width, stretch=key in {"title", "supplier"})
+        self.product_pool_tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.product_pool_tree.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.product_pool_tree.configure(yscrollcommand=scrollbar.set)
+        self.product_pool_tree.bind("<Double-1>", lambda _event: self._edit_selected_pool_product())
+
+    @staticmethod
+    def _pool_product_ready(item: dict) -> bool:
+        return all(str(item.get(key) or "").strip() for key in (
+            "supplier_1688_url", "offer_id", "model_name", "price",
+        ))
+
+    def _refresh_product_pool_tree(self):
+        tree = getattr(self, "product_pool_tree", None)
+        if tree is None:
+            return
+        selected = tree.selection()
+        tree.delete(*tree.get_children())
+        query = self.product_pool_search_var.get().strip().casefold()
+        modes = sorted({
+            str(item.get("fulfillment") or "").strip().upper() or "未填写"
+            for item in self.product_pool_products
+        })
+        self.product_pool_fulfillment_combo.configure(values=["全部履约模式", *modes])
+        fulfillment = self.product_pool_fulfillment_var.get()
+        if fulfillment not in ["全部履约模式", *modes]:
+            fulfillment = "全部履约模式"
+            self.product_pool_fulfillment_var.set(fulfillment)
+        rows = list(enumerate(self.product_pool_products))
+        sort_order = self.product_pool_sort_var.get()
+        if sort_order != "原表顺序":
+            def sales_key(row):
+                try:
+                    sales = Decimal(str(row[1].get("sales") or "").strip())
+                    if not sales.is_finite() or sales < 0:
+                        raise ValueError
+                    return (False, -sales if sort_order == "销量从高到低" else sales)
+                except (InvalidOperation, ValueError):
+                    return (True, Decimal(0))
+            rows.sort(key=sales_key)
+        shown = 0
+        for index, item in rows:
+            item_mode = str(item.get("fulfillment") or "").strip().upper() or "未填写"
+            if fulfillment != "全部履约模式" and item_mode != fulfillment:
+                continue
+            haystack = " ".join(str(item.get(key) or "") for key in (
+                "title", "sku", "brand", "category", "shop", "supplier_1688_url", "offer_id",
+            )).casefold()
+            if query and query not in haystack:
+                continue
+            is_ready = self._pool_product_ready(item)
+            shown += 1
+            self.product_pool_tree.insert("", tk.END, iid=str(index), values=(
+                item.get("no") or item.get("excel_row"), item.get("title"), item.get("sku"),
+                item.get("market_price"), item.get("sales"), item.get("fulfillment"),
+                item.get("supplier_1688_url"), item.get("offer_id"), item.get("price"),
+                "已匹配" if is_ready else "待补充",
+            ))
+        for item_id in selected:
+            if tree.exists(item_id):
+                tree.selection_add(item_id)
+        self.product_pool_status_var.set(
+            f"显示 {shown} / 共 {len(self.product_pool_products)} 个；已匹配 {sum(self._pool_product_ready(x) for x in self.product_pool_products)} 个"
+            if self.product_pool_products else "尚未导入 Excel"
+        )
+
+    def _selected_pool_product(self):
+        selected = self.product_pool_tree.selection()
+        if not selected:
+            messagebox.showwarning("未选择产品", "请先在 Excel 选品池中选择一个产品")
+            return None
+        try:
+            return self.product_pool_products[int(selected[0])]
+        except (IndexError, ValueError):
+            return None
+
+    def _choose_product_pool_excel(self):
+        path = filedialog.askopenfilename(
+            title="选择 Seerfar 导出的 Excel",
+            filetypes=[("Excel 工作簿", "*.xlsx")],
+        )
+        if path:
+            self._run(lambda selected=path: self._import_product_pool(selected))
+
+    def _import_product_pool(self, path: str):
+        saved = load_json(PRODUCT_POOL_PATH, {})
+        mappings = saved.get("mappings", {}) if isinstance(saved, dict) else {}
+        products = merge_product_mappings(load_seerfar_workbook(path), mappings)
+        self.product_pool_products = products
+        self.product_pool_source_path = str(Path(path).resolve())
+        self._save_product_pool()
+        self._ui_call(self._refresh_product_pool_tree)
+        self._log(f"Seerfar Excel 已导入 {len(products)} 个产品：{path}")
+
+    def _save_product_pool(self):
+        atomic_write_json(PRODUCT_POOL_PATH, {
+            "version": 1,
+            "source_path": self.product_pool_source_path,
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "products": self.product_pool_products,
+            "mappings": mapping_payload(self.product_pool_products),
+        })
+
+    def _load_product_pool(self):
+        payload = load_json(PRODUCT_POOL_PATH, {})
+        products = payload.get("products") if isinstance(payload, dict) else []
+        if not isinstance(products, list):
+            products = []
+        self.product_pool_products = [dict(item) for item in products if isinstance(item, dict)]
+        self.product_pool_source_path = str(payload.get("source_path") or "") if isinstance(payload, dict) else ""
+        self._refresh_product_pool_tree()
+
+    def _edit_selected_pool_product(self):
+        item = self._selected_pool_product()
+        if item is None:
+            return
+        window = tk.Toplevel(self.root)
+        window.title("匹配上架参数 - " + str(item.get("sku") or item.get("title") or "产品"))
+        window.geometry("720x720")
+        window.transient(self.root)
+        window.grab_set()
+        ttk.Label(window, text=str(item.get("title") or ""), font=("Microsoft YaHei UI", 11, "bold"), wraplength=670).grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=14, pady=(14, 4),
+        )
+        ttk.Label(
+            window,
+            text=f"Ozon SKU：{item.get('sku') or '-'}    市场价：{item.get('market_price') or '-'} RUB    销量：{item.get('sales') or '-'}",
+            foreground="#555",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 10))
+        labels = {
+            "supplier_1688_url": "采购链接", "offer_id": "货号（Offer ID）", "model_name": "型号名称",
+            "purchase_cost": "采购成本", "price": "上架售价（RUB）", "old_price": "折扣前价格",
+            "target_roi": "目标 ROI（%）", "sales_commission_percent": "标准佣金（%）",
+            "net_weight": "商品净重（克）", "weight": "包装毛重（克）",
+            "depth": "包装长度（毫米）", "width": "包装宽度（毫米）", "height": "包装高度（毫米）",
+            "stock": "可售库存", "notes": "备注",
+        }
+        defaults = {
+            "target_roi": "60", "old_price": "0", "sales_commission_percent": "",
+            "depth": "100", "width": "100", "height": "100", "stock": "1",
+        }
+        variables = {}
+        for row, field in enumerate(MAPPING_FIELDS, start=2):
+            ttk.Label(window, text=labels[field]).grid(row=row, column=0, sticky="w", padx=14, pady=4)
+            variable = tk.StringVar(value=str(item.get(field) or defaults.get(field, "")))
+            variables[field] = variable
+            ttk.Entry(window, textvariable=variable, width=68).grid(row=row, column=1, sticky="ew", padx=(0, 14), pady=4)
+        window.columnconfigure(1, weight=1)
+        def save():
+            for field, variable in variables.items():
+                item[field] = variable.get().strip()
+            self._save_product_pool()
+            self._refresh_product_pool_tree()
+            window.destroy()
+        buttons = ttk.Frame(window)
+        buttons.grid(row=2 + len(MAPPING_FIELDS), column=0, columnspan=2, sticky="e", padx=14, pady=14)
+        ttk.Button(buttons, text="保存", command=save).pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons, text="取消", command=window.destroy).pack(side=tk.LEFT, padx=5)
+
+    def _load_selected_pool_product(self):
+        item = self._selected_pool_product()
+        if item is None:
+            return
+        self._job_var("listing_mode", "follow").set("follow")
+        self._job_var("source_url").set(str(item.get("listing_url") or item.get("sku") or ""))
+        for field in (
+            "supplier_1688_url", "offer_id", "model_name", "purchase_cost", "price", "old_price",
+            "target_roi", "sales_commission_percent", "net_weight", "weight", "depth", "width", "height", "stock",
+        ):
+            value = str(item.get(field) or "").strip()
+            if value:
+                self._job_var(field).set(value)
+        self._on_listing_mode_changed()
+        pricing_keys = (
+            "purchase_cost", "label_fee", "target_roi", "advertising_percent",
+            "cargo_loss_percent", "sales_commission_percent", "weight",
+        )
+        if all(self._job_var(key).get().strip() for key in pricing_keys):
+            self._update_job_price()
+        elif str(item.get("price") or "").strip():
+            self._job_var("price").set(str(item["price"]).strip())
+        self.notebook.select(self.workbench_tab)
+        self.auto_status_var.set(
+            f"已从 Excel 选品池载入 SKU {item.get('sku') or '-'}；请确认店铺、类目、仓库和上架参数"
+        )
 
     def _build_workbench(self):
         tab = self.workbench_tab

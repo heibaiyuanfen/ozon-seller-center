@@ -110,6 +110,11 @@ def packaging_smoke_test() -> int:
         raise RuntimeError("打包后的本地新品模式未能启用图片选择按钮")
     if not hasattr(app, "wb_product_tabs") or app.wb_product_tabs.index("end") != 3:
         raise RuntimeError("打包后的 WB 上架界面未完整创建")
+    ml_panel = getattr(app, "mercadolibre_panel", None)
+    if ml_panel is None or ml_panel.tabs.index("end") != 6:
+        raise RuntimeError("打包后的美客多独立工作区未完整创建")
+    if not ml_panel.publish_button.instate(["disabled"]):
+        raise RuntimeError("美客多框架阶段真实发布必须保持禁用")
     app.wb_job = {}
     app.vars["wb_listing_mode"].set("follow")
     app._wb_on_listing_mode_changed()
