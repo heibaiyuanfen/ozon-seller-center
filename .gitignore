@@ -1,6 +1,8 @@
 RFBS上品工具/config.json
 RFBS上品工具/auto_jobs.json
 RFBS上品工具/workspace_state.json
+RFBS上品工具/sync_state.json
+RFBS上品工具/.env
 RFBS上品工具/选品池.json
 RFBS上品工具/mercadolibre-data/
 RFBS上品工具/*.ozon-api.json
@@ -23,3 +25,4 @@ __pycache__/
 build/
 发布/
 diagnostic-backup/
+.supabase/

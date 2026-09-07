@@ -6,3 +6,4 @@
 
 详细安装、测试和官方 API 流程请阅读 `RFBS上品工具/README.md`。
 
+云端多设备同步采用 Supabase/PostgreSQL；数据库迁移、数据边界和接入顺序见 [`docs/云端数据库设计与接入.md`](docs/云端数据库设计与接入.md)。
