@@ -51,6 +51,35 @@ class SeerfarImportTests(unittest.TestCase):
         self.assertEqual(merged[0]["weight"], "300")
         self.assertEqual(mapping_payload(merged)["123"]["offer_id"], "LAMP-1")
 
+    def test_reads_localized_chinese_seerfar_headers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "seerfar-cn.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "Data"
+            sheet.append([
+                "排名", "主图", "主图", "标题", "详情页地址", "SKU", "品牌", "类目",
+                "销售方式", "售价", "销量", "销售额", "毛利率", "评分", "评论数",
+                "店铺", "卖家类型", "配送方式", "重量", "上架时间",
+            ])
+            sheet.append([
+                1, '=IF(ISERROR(IMAGE("https://ir.ozone.ru/cn.jpg")),"",IMAGE("https://ir.ozone.ru/cn.jpg"))',
+                "https://ir.ozone.ru/cn.jpg", "按摩滚轮", "https://www.ozon.ru/product/3687407905",
+                3687407905, "品牌", "运动按摩器", "跨境卖家可售", "212₽", 21514,
+                "4390503₽", "49.9%", 4.8, 320, "店铺", "跨境卖家", "FBO", "300 g", "1个月",
+            ])
+            workbook.save(path)
+            products = load_seerfar_workbook(path)
+
+        self.assertEqual(len(products), 1)
+        self.assertEqual(products[0]["title"], "按摩滚轮")
+        self.assertEqual(products[0]["listing_url"], "https://www.ozon.ru/product/3687407905")
+        self.assertEqual(products[0]["sku"], "3687407905")
+        self.assertEqual(products[0]["image_url"], "https://ir.ozone.ru/cn.jpg")
+        self.assertEqual(products[0]["market_price"], "212")
+        self.assertEqual(products[0]["sales"], "21514")
+        self.assertEqual(products[0]["source_weight"], "300")
+
     def test_rejects_unrelated_excel_layout(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "bad.xlsx"

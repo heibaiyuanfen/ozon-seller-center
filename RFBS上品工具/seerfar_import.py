@@ -7,6 +7,29 @@ from typing import Any
 
 REQUIRED_HEADERS = {"Title", "Listing URL", "SKU"}
 
+# Seerfar exports localized column names according to the UI language. Keep one
+# canonical set internally so old English exports and current Chinese exports
+# follow exactly the same parsing path.
+HEADER_ALIASES = {
+    "排名": "NO.",
+    "主图": "Image",
+    "标题": "Title",
+    "详情页地址": "Listing URL",
+    "品牌": "Brand",
+    "类目": "Categories",
+    "售价": "Price",
+    "销量": "Sales",
+    "销售额": "Revenue",
+    "毛利率": "Gross Margin",
+    "评分": "Ratings",
+    "评论数": "NO. Ratings",
+    "店铺": "Shop",
+    "卖家类型": "Seller type",
+    "配送方式": "Fulfillment",
+    "重量": "Weight",
+    "上架时间": "Launch Age",
+}
+
 
 def _text(value: Any) -> str:
     if value is None:
@@ -14,6 +37,11 @@ def _text(value: Any) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
     return str(value).strip()
+
+
+def _canonical_header(value: Any) -> str:
+    header = _text(value).replace("\u00a0", " ").strip()
+    return HEADER_ALIASES.get(header, header)
 
 
 def _number_text(value: Any) -> str:
@@ -48,7 +76,7 @@ def load_seerfar_workbook(path: str | Path) -> list[dict[str, str]]:
             raw_headers = next(rows)
         except StopIteration as error:
             raise ValueError("Excel 没有数据") from error
-        headers = [_text(value) for value in raw_headers]
+        headers = [_canonical_header(value) for value in raw_headers]
         missing = sorted(REQUIRED_HEADERS - set(headers))
         if missing:
             raise ValueError("不是支持的 Seerfar 选品表，缺少列：" + "、".join(missing))
