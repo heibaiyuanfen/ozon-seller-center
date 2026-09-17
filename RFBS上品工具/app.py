@@ -939,7 +939,10 @@ class RfbsListingApp(WbUiMixin):
         self._entry(tab, "AccessKey ID", "oss_access_key_id", 21)
         self._entry(tab, "AccessKey Secret", "oss_access_key_secret", 21, 2, show="*")
         self._entry(tab, "对象前缀", "oss_object_prefix", 22, default="rfbs-listing")
-        ttk.Button(tab, text="保存全部配置", command=self._save_config).grid(row=23, column=3, sticky="e", padx=5, pady=12)
+        config_actions = ttk.Frame(tab)
+        config_actions.grid(row=23, column=0, columnspan=4, sticky="e", padx=5, pady=12)
+        ttk.Button(config_actions, text="导出配置", command=self._export_config).pack(side=tk.LEFT, padx=5)
+        ttk.Button(config_actions, text="保存全部配置", command=self._save_config).pack(side=tk.LEFT, padx=5)
         ttk.Label(tab, text="配置保存在本机 config.json；请勿上传或分享密钥文件。", foreground="#8a5a00").grid(row=24, column=0, columnspan=4, sticky="w")
 
     def _build_product(self):
@@ -1581,6 +1584,26 @@ class RfbsListingApp(WbUiMixin):
             messagebox.showerror("配置保存失败", str(error))
             return
         messagebox.showinfo("完成", f"配置已保存：{CONFIG_PATH}")
+
+    def _export_config(self):
+        """Export the current in-memory settings to a user-selected JSON file."""
+        try:
+            selected_shop_id = self.vars.get("ozon_shop_id").get().strip() if self.vars.get("ozon_shop_id") else ""
+            if selected_shop_id or any(self.vars[key].get().strip() for key in ("ozon_shop_name", "ozon_client_id", "ozon_api_key", "ozon_proxy_url")):
+                self._upsert_current_ozon_shop()
+            target = filedialog.asksaveasfilename(
+                title="导出配置",
+                defaultextension=".json",
+                initialfile="ozon-rfbs-config.json",
+                filetypes=[("JSON 配置", "*.json"), ("所有文件", "*.*")],
+            )
+            if not target:
+                return
+            atomic_write_json(target, self._config())
+        except Exception as error:
+            messagebox.showerror("配置导出失败", str(error))
+            return
+        messagebox.showinfo("配置已导出", f"配置已导出到：{target}\n文件包含 API 密钥，请妥善保管。")
 
     def _load_config(self):
         cfg = load_json(CONFIG_PATH, {})

@@ -33,8 +33,11 @@ foreach ($commandName in @("python", "py")) {
 }
 
 $BundledPythonRoot = Join-Path $env:USERPROFILE ".cache\codex-runtimes\codex-primary-runtime\dependencies\python"
-if (-not $PythonPath -and (Test-Path -LiteralPath (Join-Path $BundledPythonRoot "python.exe"))) {
-    $PythonPath = Join-Path $BundledPythonRoot "python.exe"
+$BundledPythonPath = Join-Path $BundledPythonRoot "python.exe"
+if (Test-Path -LiteralPath $BundledPythonPath) {
+    # Prefer the bundled interpreter: it contains the Tk/Tcl runtime and the
+    # PyInstaller toolchain required for a portable GUI build.
+    $PythonPath = $BundledPythonPath
     $env:TCL_LIBRARY = Join-Path $BundledPythonRoot "tcl\tcl8.6"
     $env:TK_LIBRARY = Join-Path $BundledPythonRoot "tcl\tk8.6"
 }

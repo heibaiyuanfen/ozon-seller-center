@@ -12,12 +12,18 @@ datas = []
 binaries = []
 hiddenimports = []
 hiddenimports += ["parallel_worker"]
-hiddenimports += ["parallel_worker"]
 for package_name in ("playwright", "alibabacloud_oss_v2", "openpyxl"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
     datas += package_datas
     binaries += package_binaries
     hiddenimports += package_hiddenimports
+
+# PyInstaller may reject the bundled Python's Tk probe on managed runtimes;
+# include Tk explicitly so the GUI import and native extension are packaged.
+tk_root = Path(sys.base_prefix)
+datas += [(str(tk_root / "Lib" / "tkinter"), "tkinter")]
+hiddenimports += ["tkinter", "_tkinter"]
+binaries += [(str(tk_root / "DLLs" / "_tkinter.pyd"), ".")]
 
 # Python 3.13 + PyInstaller may discover Tcl/Tk subdirectories while omitting
 # the root scripts (notably init.tcl and tk.tcl). Include both runtime trees
