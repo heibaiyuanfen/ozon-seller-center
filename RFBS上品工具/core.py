@@ -353,6 +353,29 @@ def parse_ozon_hashtags(value: Any) -> list[str]:
     return formatted.split() if formatted else []
 
 
+def complete_ozon_hashtags(value: Any, title: str, minimum: int = OZON_HASHTAG_MIN_COUNT) -> list[str]:
+    """Complete a short AI tag list with factual title-based search phrases."""
+    tags = parse_ozon_hashtags(value)
+    if len(tags) >= minimum:
+        return tags[:OZON_HASHTAG_MAX_COUNT]
+
+    words = [
+        word for word in re.findall(r"[^\W_]+", str(title or "").casefold(), flags=re.UNICODE)
+        if len(word) > 1
+    ][:8]
+    phrases: list[str] = []
+    for size in (1, 2, 3):
+        phrases.extend(" ".join(words[index:index + size]) for index in range(len(words) - size + 1))
+    base_phrases = phrases[:]
+    for phrase in base_phrases:
+        phrases.extend((
+            f"купить {phrase}", f"заказать {phrase}", f"{phrase} цена",
+            f"{phrase} онлайн", f"{phrase} каталог", f"выбор {phrase}",
+        ))
+    combined = parse_ozon_hashtags([*tags, *phrases])
+    return combined[:OZON_HASHTAG_MAX_COUNT]
+
+
 def validate_ozon_hashtags(
     value: Any,
     minimum: int = OZON_HASHTAG_MIN_COUNT,
@@ -538,14 +561,16 @@ def parse_reference_html(url: str, page: str) -> ReferenceProduct:
     return ReferenceProduct(url, title, description, images, properties, tags)
 
 
-def scrape_reference_browser(url: str, *, timeout=180, log_func=None) -> ReferenceProduct:
+def scrape_reference_browser(
+    url: str, *, timeout=180, log_func=None, profile_dir: str | Path | None = None,
+) -> ReferenceProduct:
     """Load a blocked storefront page in a visible, dedicated Edge profile."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as error:
         raise RuntimeError("Ozon 拒绝了直接解析；请先安装浏览器解析组件：pip install playwright") from error
 
-    profile_dir = APP_DATA_DIR / "browser_profile"
+    profile_dir = Path(profile_dir) if profile_dir else APP_DATA_DIR / "browser_profile"
     requested_article = extract_reference_article(url)
     profile_dir.mkdir(parents=True, exist_ok=True)
     if log_func:
@@ -828,13 +853,18 @@ def scrape_reference_browser(url: str, *, timeout=180, log_func=None) -> Referen
             context.close()
 
 
-def scrape_reference(url: str, *, session=None, timeout=30, browser_fallback=True, log_func=None) -> ReferenceProduct:
+def scrape_reference(
+    url: str, *, session=None, timeout=30, browser_fallback=True, log_func=None,
+    profile_dir: str | Path | None = None,
+) -> ReferenceProduct:
     normalized_url = normalize_reference_input(url)
     requested_article = extract_reference_article(normalized_url)
     client = session or requests.Session()
     response = client.get(normalized_url, headers={"User-Agent": USER_AGENT, "Accept-Language": "ru-RU,ru;q=0.9"}, timeout=timeout)
     if response.status_code == 403 and browser_fallback:
-        return scrape_reference_browser(normalized_url, timeout=max(120, timeout), log_func=log_func)
+        return scrape_reference_browser(
+            normalized_url, timeout=max(120, timeout), log_func=log_func, profile_dir=profile_dir,
+        )
     response.raise_for_status()
     try:
         final_url = str(getattr(response, "url", normalized_url) or normalized_url)
@@ -847,11 +877,15 @@ def scrape_reference(url: str, *, session=None, timeout=30, browser_fallback=Tru
         if browser_fallback and not reference.images:
             if log_func:
                 log_func("Ozon 直连响应已读取到标题，但图库为空；切换到浏览器重新加载商品图库")
-            return scrape_reference_browser(normalized_url, timeout=max(120, timeout), log_func=log_func)
+            return scrape_reference_browser(
+                normalized_url, timeout=max(120, timeout), log_func=log_func, profile_dir=profile_dir,
+            )
         return _attach_reference_article(reference, requested_article)
     except RuntimeError:
         if browser_fallback:
-            return scrape_reference_browser(normalized_url, timeout=max(120, timeout), log_func=log_func)
+            return scrape_reference_browser(
+                normalized_url, timeout=max(120, timeout), log_func=log_func, profile_dir=profile_dir,
+            )
         raise
 
 

@@ -174,4 +174,8 @@ def packaging_smoke_test() -> int:
 if __name__ == "__main__":
     if "--packaging-smoke-test" in sys.argv:
         raise SystemExit(packaging_smoke_test())
+    if "--parallel-job-worker" in sys.argv:
+        from parallel_worker import run_parallel_job
+        index = sys.argv.index("--parallel-job-worker")
+        raise SystemExit(run_parallel_job(sys.argv[index + 1], sys.argv[index + 2]))
     launch()

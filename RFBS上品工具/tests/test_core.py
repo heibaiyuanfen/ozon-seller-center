@@ -19,7 +19,7 @@ from PIL import Image, ImageDraw
 APP_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP_DIR))
 
-from core import ProductInput, ReferenceProduct, attribute_values_by_id, build_import_item, calculate_price_breakdown, calculate_roi_price, calculate_shipping, clean_attribute_payload, extract_hashtags, extract_reference_article, find_reference_fact, flatten_categories, format_ozon_hashtags, normalize_reference_input, parse_attributes, parse_complex_attributes, parse_ozon_hashtags, parse_reference_html, prefer_high_resolution_image_url, rank_categories, recommend_category, scrape_reference, set_attribute_value, unsupported_chinese_submission_fields, validate_ozon_hashtags, validate_required
+from core import ProductInput, ReferenceProduct, attribute_values_by_id, build_import_item, calculate_price_breakdown, calculate_roi_price, calculate_shipping, clean_attribute_payload, complete_ozon_hashtags, extract_hashtags, extract_reference_article, find_reference_fact, flatten_categories, format_ozon_hashtags, normalize_reference_input, parse_attributes, parse_complex_attributes, parse_ozon_hashtags, parse_reference_html, prefer_high_resolution_image_url, rank_categories, recommend_category, scrape_reference, set_attribute_value, unsupported_chinese_submission_fields, validate_ozon_hashtags, validate_required
 from services import CopywritingService, ImageDownloadService, ImageGenerationService, OzonApi, OzonDictionaryCache, ProductVisionAnalysisService, WatermarkService, build_oss_object_keys, build_ozon_main_image_prompt, build_ozon_poster_text_lines, normalize_chat_completions_url, normalize_image_edits_url, visual_attribute_allowed
 from app import AutoJobCancelled, RfbsListingApp, WORKSPACE_FIELD_KEYS
 
@@ -475,6 +475,15 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "25–30"):
             validate_ozon_hashtags(valid[:24])
 
+    def test_short_ai_hashtag_list_is_completed_from_title(self):
+        tags = complete_ozon_hashtags(
+            ["автомобильный держатель", "держатель телефона"],
+            "Автомобильный держатель телефона на панель",
+        )
+        self.assertGreaterEqual(len(tags), 25)
+        self.assertEqual(len(tags), len(set(tags)))
+        self.assertTrue(all(len(tag) <= 30 for tag in tags))
+
     def test_required_attributes_must_have_real_values(self):
         definitions = [{"id": 1, "name": "Бренд", "is_required": True}]
         self.assertEqual(validate_required([], definitions), ["Бренд"])
@@ -644,7 +653,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result["tags_ru"], [f"поисковый тег {index}" for index in range(25)])
         self.assertEqual(normalize_chat_completions_url("https://api.gpt.ge/"), "https://api.gpt.ge/v1/chat/completions")
 
-    def test_copywriting_rejects_fewer_than_25_normalized_tags(self):
+    def test_copywriting_completes_fewer_than_25_normalized_tags(self):
         class Response:
             status_code = 200
             text = ""
@@ -661,10 +670,11 @@ class CoreTests(unittest.TestCase):
             def post(self, _url, **_kwargs):
                 return Response()
 
-        with self.assertRaisesRegex(RuntimeError, "25–30"):
-            CopywritingService(
-                "https://api.example", "key", "model", session=Session(),
-            ).generate(ReferenceProduct("https://ozon.ru/product/x", "Люстра"))
+        result = CopywritingService(
+            "https://api.example", "key", "model", session=Session(),
+        ).generate(ReferenceProduct("https://ozon.ru/product/x", "Люстра"))
+        self.assertGreaterEqual(len(result["tags_ru"]), 25)
+        self.assertLessEqual(len(result["tags_ru"]), 30)
 
     def test_ai_category_choice_is_restricted_to_live_candidates(self):
         class Response:

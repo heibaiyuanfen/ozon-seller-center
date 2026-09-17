@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import time
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -276,6 +278,44 @@ def _save_atomic(workbook, path: Path):
             pass
 
 
+@contextmanager
+def _process_file_lock(path: Path, timeout: float = 60):
+    """Serialize workbook updates across parallel listing processes on Windows."""
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(lock_path, "a+b")
+    deadline = time.monotonic() + timeout
+    try:
+        if os.name == "nt":
+            import msvcrt
+            while True:
+                try:
+                    handle.seek(0)
+                    if handle.tell() == 0 and lock_path.stat().st_size == 0:
+                        handle.write(b"0")
+                        handle.flush()
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("等待 Excel 产品台账写入锁超时")
+                    time.sleep(0.1)
+        yield
+    finally:
+        if os.name == "nt":
+            try:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        handle.close()
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def upsert_product_ledger(path: str | Path, record: dict) -> dict:
     """Create or update one listing row, keyed by shop and Offer ID."""
     ledger_path = Path(path).expanduser().resolve()
@@ -283,7 +323,7 @@ def upsert_product_ledger(path: str | Path, record: dict) -> dict:
     if not offer_id:
         raise ValueError("写入产品台账时货号不能为空")
 
-    with _LEDGER_LOCK:
+    with _LEDGER_LOCK, _process_file_lock(ledger_path):
         workbook, worksheet, workbook_created = _load_or_create_workbook(ledger_path)
         header_by_title = _ensure_headers(worksheet)
         target_row = _matching_row(worksheet, header_by_title, record)

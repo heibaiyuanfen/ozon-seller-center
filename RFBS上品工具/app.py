@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import queue
 import re
 import shutil
+import subprocess
+import sys
 import threading
 import time
 import uuid
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from core import (
-    ProductInput, ReferenceProduct, atomic_write_json, attribute_values_by_id,
+    ProductInput, ReferenceProduct, atomic_write_json, attribute_values_by_id, complete_ozon_hashtags,
     build_import_item, calculate_price_breakdown, calculate_roi_price, clean_attribute_payload,
     export_reference, find_reference_fact,
     flatten_categories, format_ozon_hashtags, load_json, normalize_attribute_name,
@@ -119,7 +123,14 @@ class RfbsListingApp(WbUiMixin):
         self.auto_job_queue: queue.Queue[str] = queue.Queue()
         self.auto_job_lock = threading.RLock()
         self.auto_job_worker_running = False
+        self.auto_job_workers_active = 0
+        self.active_job_ids: set[str] = set()
+        self.active_job_processes: dict[str, subprocess.Popen] = {}
+        self.active_product_groups: set[str] = set()
+        self.parallel_subprocess_enabled = os.environ.get("OZON_PARALLEL_WORKER") != "1"
         self.active_job_id = ""
+        self.prefetch_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="ozon-prefetch")
+        self.prefetch_futures: dict[str, object] = {}
         self._initialize_wb_state()
         self._build()
         self._load_config()
@@ -127,7 +138,8 @@ class RfbsListingApp(WbUiMixin):
         self._load_category_cache()
         self._restore_workspace()
         self._initialize_job_form_from_workspace()
-        self._load_auto_jobs()
+        if os.environ.get("OZON_PARALLEL_WORKER") != "1":
+            self._load_auto_jobs()
         self._load_product_pool()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(100, self._poll_log)
@@ -734,6 +746,14 @@ class RfbsListingApp(WbUiMixin):
         self.auto_progress.grid(row=0, column=1, sticky="ew")
         self.auto_status_var = tk.StringVar(value="等待录入；真实上架会在启动前集中确认一次")
         ttk.Label(action, textvariable=self.auto_status_var, foreground="#245a8d").grid(row=1, column=1, sticky="w", pady=(5, 0))
+        prefetch_controls = ttk.Frame(action)
+        prefetch_controls.grid(row=0, column=2, rowspan=2, padx=(12, 0), sticky="e")
+        ttk.Label(prefetch_controls, text="并发预处理").pack(side=tk.LEFT)
+        self.prefetch_workers_var = tk.IntVar(value=3)
+        ttk.Spinbox(
+            prefetch_controls, from_=1, to=5, width=3,
+            textvariable=self.prefetch_workers_var, command=self._reset_prefetch_executor,
+        ).pack(side=tk.LEFT, padx=(5, 0))
         ttk.Label(
             tab,
             text="自动重试：页面读取/下载、文案 AI、图片生成、OSS、类目属性读取和库存写入。\n"
@@ -765,6 +785,7 @@ class RfbsListingApp(WbUiMixin):
         ttk.Button(controls, text="继续/重试选中任务", command=self._retry_selected_job).pack(side=tk.LEFT, padx=6)
         ttk.Button(controls, text="停止选中任务", command=self._stop_selected_job).pack(side=tk.LEFT, padx=6)
         ttk.Button(controls, text="清除已结束任务", command=self._clear_finished_jobs).pack(side=tk.LEFT, padx=6)
+        ttk.Button(controls, text="清理已完成图片", command=self._cleanup_completed_job_images).pack(side=tk.LEFT, padx=6)
         self._on_listing_mode_changed()
 
     def _set_job_local_image_paths(self, paths):
@@ -1776,6 +1797,7 @@ class RfbsListingApp(WbUiMixin):
                 self._closing = False
                 self.root.after(15000, self._autosave_workspace)
                 return
+        self.prefetch_executor.shutdown(wait=False, cancel_futures=True)
         self.root.destroy()
 
     def _ozon_shop_for_api(self, shop_id: str | None = None) -> dict:
@@ -2221,6 +2243,24 @@ class RfbsListingApp(WbUiMixin):
                 job["cancel_requested"] = False
                 job["error"] = "程序上次关闭时任务尚未完成；请点击修复或继续"
                 changed = True
+            submitted_path = Path(str(job.get("submitted_path") or ""))
+            if job.get("stock_completed") and submitted_path.is_file():
+                submitted = load_json(submitted_path, {})
+                stock_results = (submitted.get("stock_result") or {}).get("result") or []
+                failed_stock = next((
+                    result for result in stock_results if isinstance(result, dict)
+                    and (result.get("updated") is not True or result.get("errors"))
+                ), None)
+                if failed_stock:
+                    details = json.dumps(failed_stock, ensure_ascii=False)
+                    job["status"] = "failed"
+                    job["stage"] = 6
+                    job["failed_stage"] = 7
+                    job["stock_completed"] = False
+                    job["ledger_completed"] = False
+                    job["error"] = "Ozon 库存写入失败：" + details
+                    job["message"] = "请确认 RFBS 仓库后点击继续/重试"
+                    changed = True
         if changed:
             self._save_auto_jobs()
         self._refresh_job_tree()
@@ -2312,6 +2352,7 @@ class RfbsListingApp(WbUiMixin):
             self._save_auto_jobs()
         for job in jobs:
             self.auto_job_queue.put(job["id"])
+        self._schedule_job_prefetch(jobs)
         self._refresh_job_tree()
         self.job_form_vars["source_url"].set("")
         self._job_var("amazon_source").set("")
@@ -2329,14 +2370,87 @@ class RfbsListingApp(WbUiMixin):
         self._start_auto_job_worker()
 
     def _start_auto_job_worker(self):
+        try:
+            desired = max(1, min(5, int(self.prefetch_workers_var.get())))
+        except (TypeError, ValueError, tk.TclError):
+            desired = 3
         with self.auto_job_lock:
-            if self.auto_job_worker_running:
-                return
             self.auto_job_worker_running = True
-        threading.Thread(target=self._auto_job_worker, daemon=True).start()
+            missing = max(0, desired - self.auto_job_workers_active)
+            self.auto_job_workers_active += missing
+        for _index in range(missing):
+            threading.Thread(target=self._auto_job_worker, daemon=True).start()
+
+    def _reset_prefetch_executor(self):
+        try:
+            workers = max(1, min(5, int(self.prefetch_workers_var.get())))
+        except (TypeError, ValueError, tk.TclError):
+            workers = 3
+        old = self.prefetch_executor
+        self.prefetch_executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ozon-prefetch")
+        old.shutdown(wait=False, cancel_futures=False)
+
+    def _schedule_job_prefetch(self, jobs):
+        """Prefetch distinct follow-listing products without touching shared Tk state."""
+        for job in jobs:
+            inputs = job.get("inputs") or {}
+            group_id = str(inputs.get("product_group_id") or job.get("id") or "")
+            if self._local_listing_enabled(inputs) or group_id in self.prefetch_futures:
+                continue
+            future = self.prefetch_executor.submit(self._prefetch_job_source, job)
+            self.prefetch_futures[group_id] = future
+
+    def _prefetch_job_source(self, job):
+        inputs = job.get("inputs") or {}
+        offer_id = str(inputs.get("offer_id") or "")
+        group_id = str(inputs.get("product_group_id") or job.get("id") or "prefetch")
+        safe_group = re.sub(r"[^A-Za-z0-9._-]+", "_", group_id).strip("._-") or "prefetch"
+        try:
+            reference = scrape_reference(
+                str(inputs.get("source_url") or ""), timeout=45,
+                browser_fallback=True, log_func=self._log,
+                profile_dir=APP_DIR / "browser_profiles_parallel" / safe_group,
+            )
+            if not reference.images:
+                raise RuntimeError("直连采集未返回图片")
+            output_dir = self._source_output_dir(reference)
+            paths = ImageDownloadService().download(
+                reference.images, str(output_dir), limit=15, log_func=self._log,
+            )
+            state = {
+                "fields": {
+                    "source_url": reference.source_url,
+                    "title": reference.title,
+                    "tags": format_ozon_hashtags(reference.tags),
+                },
+                "description": reference.description,
+                "reference": export_reference(reference),
+                "source_images": list(paths), "local_images": list(paths),
+                "uploaded_urls": [], "primary_reference_index": 0,
+            }
+            with self.auto_job_lock:
+                job["prefetch_state"] = state
+                job["prefetch_status"] = "completed"
+                job["message"] = "并发预处理已完成，等待上架"
+                self._save_auto_jobs()
+            self._refresh_job_tree()
+            self._log(f"{offer_id}：并发采集和原图下载已完成")
+            return state
+        except Exception as error:
+            with self.auto_job_lock:
+                job["prefetch_status"] = "deferred"
+                job["prefetch_error"] = str(error)
+            self._log(f"{offer_id}：并发直连预处理未完成，轮到该任务时将使用浏览器正常采集")
+            return None
 
     def _auto_job_worker(self):
         self.busy = True
+        if not hasattr(self, "active_product_groups"):
+            self.active_product_groups = set()
+        if not hasattr(self, "active_job_ids"):
+            self.active_job_ids = set()
+        if not hasattr(self, "active_job_processes"):
+            self.active_job_processes = {}
         try:
             while True:
                 try:
@@ -2347,58 +2461,115 @@ class RfbsListingApp(WbUiMixin):
                     job = self.auto_jobs.get(job_id)
                     should_skip = not job or job.get("status") != "queued"
                     if not should_skip:
-                        self.active_job_id = job_id
-                        job["status"] = "running"
-                        job["cancel_requested"] = False
-                        job["error"] = ""
-                        job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-                        self._save_auto_jobs()
+                        inputs = job.get("inputs") or {}
+                        group_id = str(inputs.get("product_group_id") or job_id)
+                        if group_id in self.active_product_groups:
+                            self.auto_job_queue.put(job_id)
+                            should_skip = True
+                        else:
+                            self.active_product_groups.add(group_id)
+                            self.active_job_ids.add(job_id)
+                            job["status"] = "running"
+                            job["cancel_requested"] = False
+                            job["error"] = ""
+                            job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                            self._save_auto_jobs()
                 if should_skip:
                     self.auto_job_queue.task_done()
+                    time.sleep(0.15)
                     continue
                 self._refresh_job_tree()
                 try:
-                    self._run_auto_job(job)
-                    job["status"] = "completed"
-                    job["stage"] = 7
-                    job["message"] = "上架、RFBS 库存和 Excel 台账已完成"
-                    job["error"] = ""
+                    if getattr(self, "parallel_subprocess_enabled", False):
+                        self._run_job_subprocess(job)
+                    else:
+                        self.active_job_id = job_id
+                        self._run_auto_job(job)
+                        job.update({
+                            "status": "completed", "stage": 7, "error": "",
+                            "message": "上架、RFBS 库存和 Excel 台账已完成",
+                        })
                 except AutoJobCancelled as error:
                     job["status"] = "cancelled"
                     job["cancel_requested"] = False
                     job["error"] = ""
                     job["message"] = str(error) or "任务已按要求停止"
-                    try:
-                        job["state"] = self._ui_call(self._workspace_payload)
-                    except Exception:
-                        pass
-                    self._log(
-                        f"任务 {job.get('inputs', {}).get('offer_id')} 已按要求停止；"
-                        "其他排队任务将继续运行"
-                    )
                 except Exception as error:
                     job["status"] = "failed"
                     job["failed_stage"] = min(7, int(job.get("stage") or 0) + 1)
                     job["error"] = str(error) or type(error).__name__
                     job["message"] = "点击“修复选中任务”修改后继续"
-                    try:
-                        job["state"] = self._ui_call(self._workspace_payload)
-                    except Exception:
-                        pass
                     self._log(f"任务 {job.get('inputs', {}).get('offer_id')} 已暂停待修复：{job['error']}")
                 finally:
+                    group_id = str((job.get("inputs") or {}).get("product_group_id") or job_id)
+                    with self.auto_job_lock:
+                        self.active_product_groups.discard(group_id)
+                        self.active_job_ids.discard(job_id)
+                        self.active_job_processes.pop(job_id, None)
                     job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
                     self._save_auto_jobs()
                     self._refresh_job_tree()
                     self.auto_job_queue.task_done()
         finally:
-            self.active_job_id = ""
-            self.busy = False
             with self.auto_job_lock:
-                self.auto_job_worker_running = False
-            self.root.after(0, lambda: self.auto_status_var.set("队列当前已处理完；可继续加入产品或修复失败任务"))
-            if not self.auto_job_queue.empty():
-                self._start_auto_job_worker()
+                self.auto_job_workers_active = max(0, getattr(self, "auto_job_workers_active", 1) - 1)
+                self.auto_job_worker_running = self.auto_job_workers_active > 0
+                self.busy = self.auto_job_worker_running
+            if not self.auto_job_worker_running:
+                self.root.after(0, lambda: self.auto_status_var.set("队列当前已处理完；可继续加入产品或修复失败任务"))
+
+    def _run_job_subprocess(self, job: dict):
+        job_id = str(job["id"])
+        inputs = job.get("inputs") or {}
+        group_id = str(inputs.get("product_group_id") or "")
+        if group_id and int(job.get("stage") or 0) < 2:
+            for other in self.auto_jobs.values():
+                other_inputs = other.get("inputs") or {}
+                if other is job or str(other_inputs.get("product_group_id") or "") != group_id:
+                    continue
+                if int(other.get("stage") or 0) >= 2 and isinstance(other.get("state"), dict):
+                    job["state"] = other["state"]
+                    job["stage"] = 2
+                    job["message"] = "已复用同商品采集、原图和文案"
+                    break
+        work_dir = APP_DIR / "parallel-jobs"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        request_path = work_dir / f"{job_id}.request.json"
+        result_path = work_dir / f"{job_id}.result.json"
+        result_path.unlink(missing_ok=True)
+        atomic_write_json(request_path, {"job": job})
+        if getattr(sys, "frozen", False):
+            command = [sys.executable, "--parallel-job-worker", str(request_path), str(result_path)]
+        else:
+            command = [sys.executable, str(Path(__file__).with_name("main.py")), "--parallel-job-worker", str(request_path), str(result_path)]
+        environment = os.environ.copy()
+        environment["OZON_PARALLEL_WORKER"] = "1"
+        process = subprocess.Popen(command, env=environment, creationflags=subprocess.CREATE_NO_WINDOW)
+        with self.auto_job_lock:
+            self.active_job_processes[job_id] = process
+        while process.poll() is None:
+            time.sleep(0.4)
+            progress = load_json(result_path, {})
+            progress_job = progress.get("job") if isinstance(progress, dict) else None
+            if isinstance(progress_job, dict):
+                with self.auto_job_lock:
+                    job.update(progress_job)
+                    job["status"] = "running"
+                self._refresh_job_tree()
+        exit_code = int(process.returncode or 0)
+        payload = load_json(result_path, {})
+        returned_job = payload.get("job") if isinstance(payload, dict) else None
+        if isinstance(returned_job, dict):
+            job.clear()
+            job.update(returned_job)
+        request_path.unlink(missing_ok=True)
+        result_path.unlink(missing_ok=True)
+        if exit_code != 0 or not payload.get("ok"):
+            if job.get("status") == "stopping":
+                job["status"] = "cancelled"
+                job["message"] = "任务已停止"
+                return
+            raise RuntimeError(str(payload.get("error") or f"并行子进程退出码 {exit_code}"))
 
     def _reset_execution_for_job(self):
         self.reference = ReferenceProduct("", "")
@@ -2532,11 +2703,24 @@ class RfbsListingApp(WbUiMixin):
                         attempts=3, cancel_check=cancel_check,
                     )
                 else:
-                    self._set_auto_progress(1, f"{offer_id}：读取商品并下载高清原图")
-                    self._retry_step(
-                        "商品解析/原图下载", self._parse_url, attempts=3,
-                        cancel_check=cancel_check,
-                    )
+                    prefetched = job.get("prefetch_state") if isinstance(job.get("prefetch_state"), dict) else None
+                    group_id = str((job.get("inputs") or {}).get("product_group_id") or "")
+                    future = self.prefetch_futures.get(group_id)
+                    if not prefetched and future is not None and not future.done():
+                        self._set_auto_progress(1, f"{offer_id}：等待并发采集结果")
+                        try:
+                            prefetched = future.result(timeout=190)
+                        except Exception:
+                            prefetched = None
+                    if prefetched:
+                        self._ui_call(lambda: self._restore_workspace_payload(prefetched))
+                        self._log(f"{offer_id}：已复用并发预处理的商品和原图")
+                    else:
+                        self._set_auto_progress(1, f"{offer_id}：读取商品并下载高清原图")
+                        self._retry_step(
+                            "商品解析/原图下载", self._parse_url, attempts=3,
+                            cancel_check=cancel_check,
+                        )
                 self._ui_call(lambda: None)
                 self._checkpoint_auto_job(
                     job, 1, "本地图片视觉分析完成" if local_mode else "商品和原图完成",
@@ -2650,6 +2834,107 @@ class RfbsListingApp(WbUiMixin):
         self._refresh_job_tree()
         self.auto_status_var.set(f"已清除 {len(removable_ids)} 条结束任务记录；运行和排队任务已保留")
 
+    @staticmethod
+    def _job_image_paths(job: dict) -> set[Path]:
+        paths: set[Path] = set()
+        state = job.get("state") if isinstance(job.get("state"), dict) else {}
+        inputs = job.get("inputs") if isinstance(job.get("inputs"), dict) else {}
+        for values in (
+            state.get("source_images"), state.get("local_images"),
+            inputs.get("local_image_paths"),
+        ):
+            for value in values if isinstance(values, list) else []:
+                if str(value).strip():
+                    paths.add(Path(str(value)).expanduser())
+        return paths
+
+    @staticmethod
+    def _path_is_within(path: Path, parent: Path) -> bool:
+        try:
+            path.resolve().relative_to(parent.resolve())
+            return True
+        except (OSError, ValueError):
+            return False
+
+    def _cleanup_completed_job_images(self):
+        completed = [
+            job for job in self.auto_jobs.values()
+            if str(job.get("status") or "") == "completed"
+        ]
+        if not completed:
+            messagebox.showinfo("没有可清理图片", "当前没有已完成的任务图片可供清理")
+            return
+        protected = set()
+        for job in self.auto_jobs.values():
+            if str(job.get("status") or "") != "completed":
+                protected.update(path.resolve() for path in self._job_image_paths(job) if path.exists())
+        candidates = set()
+        for job in completed:
+            for path in self._job_image_paths(job):
+                try:
+                    resolved = path.resolve()
+                except OSError:
+                    continue
+                if (
+                    resolved not in protected
+                    and self._path_is_within(resolved, OUTPUT_DIR)
+                    and resolved.is_file()
+                    and resolved.suffix.casefold() in {".jpg", ".jpeg", ".png", ".webp"}
+                ):
+                    candidates.add(resolved)
+        if not candidates:
+            messagebox.showinfo("没有可清理图片", "已完成任务没有未被其他任务使用的程序图片")
+            return
+        total_bytes = sum(path.stat().st_size for path in candidates)
+        if not messagebox.askyesno(
+            "清理已完成任务图片",
+            f"将删除 {len(candidates)} 张程序下载/生成的图片，释放约 {total_bytes / 1024 / 1024:.1f} MB。\n\n"
+            "排队、运行、待修复任务的图片和您手工选择的外部原图不会删除。是否继续？",
+        ):
+            return
+        deleted = 0
+        released = 0
+        deleted_paths: set[Path] = set()
+        for path in candidates:
+            try:
+                size = path.stat().st_size
+                path.unlink()
+                deleted += 1
+                released += size
+                deleted_paths.add(path.resolve())
+            except OSError as error:
+                self._log(f"图片清理失败 {path}：{error}")
+        for directory in sorted(
+            {path.parent for path in candidates}, key=lambda item: len(item.parts), reverse=True,
+        ):
+            current = directory
+            while self._path_is_within(current, OUTPUT_DIR) and current != OUTPUT_DIR:
+                try:
+                    current.rmdir()
+                except OSError:
+                    break
+                current = current.parent
+        for job in completed:
+            state = job.get("state") if isinstance(job.get("state"), dict) else {}
+            for key in ("source_images", "local_images"):
+                values = state.get(key)
+                if isinstance(values, list):
+                    state[key] = [
+                        value for value in values
+                        if Path(str(value)).resolve() not in deleted_paths
+                    ]
+            inputs = job.get("inputs") if isinstance(job.get("inputs"), dict) else {}
+            values = inputs.get("local_image_paths")
+            if isinstance(values, list):
+                inputs["local_image_paths"] = [
+                    value for value in values
+                    if Path(str(value)).resolve() not in deleted_paths
+                ]
+            job["images_cleaned"] = True
+        self._save_auto_jobs()
+        self.auto_status_var.set(f"已清理 {deleted} 张图片，释放 {released / 1024 / 1024:.1f} MB")
+        messagebox.showinfo("清理完成", f"已删除 {deleted} 张图片，释放 {released / 1024 / 1024:.1f} MB")
+
     def _stop_selected_job(self):
         job = self._selected_job()
         if not job:
@@ -2700,6 +2985,9 @@ class RfbsListingApp(WbUiMixin):
             job["error"] = ""
             job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             self._save_auto_jobs()
+            process = getattr(self, "active_job_processes", {}).get(str(job.get("id") or ""))
+            if process is not None and process.poll() is None:
+                process.terminate()
         self._refresh_job_tree()
 
     def _retry_selected_job(self):
@@ -3493,7 +3781,9 @@ class RfbsListingApp(WbUiMixin):
             try:
                 self._validate_job_inputs(updated_inputs)
                 if int(job.get("stage") or 0) >= 2 or tags_var.get().strip():
-                    validate_ozon_hashtags(tags_var.get())
+                    repaired_tags = complete_ozon_hashtags(tags_var.get(), title_var.get())
+                    validate_ozon_hashtags(repaired_tags)
+                    tags_var.set(format_ozon_hashtags(repaired_tags))
                 repaired_attributes = parse_attributes(attrs_text.get("1.0", tk.END))
                 repaired_complex_attributes = parse_complex_attributes(
                     complex_text.get("1.0", tk.END),
@@ -4122,6 +4412,12 @@ class RfbsListingApp(WbUiMixin):
             self.root.after(0, lambda: self.vars["text_api_url"].set(service.api_url))
             self._log("文案接口地址已自动补全为：" + service.api_url)
         result = service.generate(self.reference)
+        completed_tags = complete_ozon_hashtags(result["tags_ru"], result["title_ru"])
+        if len(completed_tags) < 25:
+            raise RuntimeError(
+                f"文案 AI 标签补全后仍不足 25 个（当前 {len(completed_tags)} 个），将自动重试"
+            )
+        result["tags_ru"] = [tag[1:].replace("_", " ") for tag in completed_tags]
         def update_fields():
             self.vars["title"].set(result["title_ru"])
             self.description_text.delete("1.0", tk.END)
@@ -5604,7 +5900,12 @@ class RfbsListingApp(WbUiMixin):
                 self._job_var("warehouse_id").set(str(warehouse_id))
 
     def _generated_content(self):
-        formatted_tags = format_ozon_hashtags(self.vars["tags"].get())
+        completed_tags = complete_ozon_hashtags(
+            self.vars["tags"].get(), self.vars["title"].get(),
+        )
+        formatted_tags = format_ozon_hashtags(completed_tags)
+        if formatted_tags != self.vars["tags"].get().strip():
+            self.vars["tags"].set(formatted_tags)
         return {
             "title_ru": self.vars["title"].get().strip(),
             "description_ru": self.description_text.get("1.0", tk.END).strip(),
@@ -6022,7 +6323,7 @@ class RfbsListingApp(WbUiMixin):
             stock_result = self._retry_step(
                 "RFBS 库存写入",
                 lambda: api.update_stock(item["offer_id"], warehouse_id, stock),
-                attempts=3,
+                attempts=12, delay_seconds=10,
                 cancel_check=cancel_check,
             )
             if job_record is not None:

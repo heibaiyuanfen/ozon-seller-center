@@ -19,7 +19,7 @@ from urllib3.util.retry import Retry
 
 from core import (
     ReferenceProduct, USER_AGENT, atomic_write_json, load_json,
-    format_ozon_hashtags, prefer_high_resolution_image_url, rank_categories,
+    complete_ozon_hashtags, format_ozon_hashtags, prefer_high_resolution_image_url, rank_categories,
     reference_fact_map, validate_ozon_hashtags,
 )
 
@@ -266,9 +266,27 @@ class OzonApi:
         return warehouses
 
     def update_stock(self, offer_id: str, warehouse_id: int, stock: int):
-        return self.post("/v2/products/stocks", {"stocks": [{
+        data = self.post("/v2/products/stocks", {"stocks": [{
             "offer_id": offer_id, "warehouse_id": int(warehouse_id), "stock": int(stock)
         }]})
+        results = data.get("result") if isinstance(data, dict) else None
+        matching = next((
+            item for item in (results or []) if isinstance(item, dict)
+            and str(item.get("offer_id") or "") == str(offer_id)
+        ), None)
+        if matching is None:
+            raise RuntimeError(f"Ozon 库存接口未返回货号 {offer_id} 的处理结果")
+        if matching.get("updated") is not True or matching.get("errors"):
+            errors = matching.get("errors") or []
+            codes = {str(item.get("code") or "") for item in errors if isinstance(item, dict)}
+            detail = json.dumps(matching, ensure_ascii=False)
+            if "WAREHOUSE_WRONG_STATUS" in codes:
+                raise ValueError(
+                    f"RFBS 仓库 {warehouse_id} 不可写（可能已归档或未创建完成），"
+                    f"请重新读取并选择有效仓库：{detail}"
+                )
+            raise RuntimeError("商品尚未在库存系统中就绪：" + detail)
+        return data
 
 
 class OzonDictionaryCache:
@@ -1406,6 +1424,9 @@ class CopywritingService:
             elif isinstance(raw_tags, dict):
                 raw_tags = list(raw_tags.values())
             formatted_tags = format_ozon_hashtags(raw_tags)
+            formatted_tags = format_ozon_hashtags(
+                complete_ozon_hashtags(formatted_tags, title)
+            )
             try:
                 validated_tags = validate_ozon_hashtags(formatted_tags)
             except ValueError as error:

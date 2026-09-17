@@ -11,6 +11,8 @@ tool_dir = Path(SPEC).resolve().parent
 datas = []
 binaries = []
 hiddenimports = []
+hiddenimports += ["parallel_worker"]
+hiddenimports += ["parallel_worker"]
 for package_name in ("playwright", "alibabacloud_oss_v2", "openpyxl"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
     datas += package_datas
