@@ -82,6 +82,8 @@ def packaging_smoke_test() -> int:
     root = tk.Tk()
     root.withdraw()
     app = RfbsListingApp(root)
+    if not hasattr(app, "listing_workers_spinbox") or not 1 <= app._listing_concurrency() <= 5:
+        raise RuntimeError("上架并发数设置未正常创建")
     manual_pricing = app._job_price_breakdown({
         "purchase_cost": "15", "label_fee": "2", "target_roi": "60",
         "sales_commission_percent": "18", "weight": "600", "fbp_pricing": "0",

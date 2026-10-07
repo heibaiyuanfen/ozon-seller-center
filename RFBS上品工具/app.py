@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import os
 import queue
@@ -33,6 +34,7 @@ from services import (
     build_ozon_main_image_prompt, build_ozon_poster_text_lines,
 )
 from product_ledger import upsert_product_ledger
+from shop_variants import DuplicateMainImageError, ShopVariantRegistry, shop_offer_id, variant_directory
 from runtime_paths import APP_DATA_DIR
 from wb_ui import WbUiMixin
 from mercadolibre.ui import MercadoLibrePanel
@@ -47,6 +49,7 @@ OUTPUT_DIR = APP_DIR / "输出"
 DICTIONARY_CACHE_DIR = APP_DIR / "cache" / "ozon-dictionaries"
 CATEGORY_CACHE_PATH = APP_DIR / "cache" / "ozon-categories.json"
 AUTO_JOBS_PATH = APP_DIR / "auto_jobs.json"
+SHOP_VARIANTS_PATH = APP_DIR / "shop_variants.db"
 PRODUCT_LEDGER_PATH = APP_DIR / "产品台账.xlsx"
 PRODUCT_POOL_PATH = APP_DIR / "选品池.json"
 WB_JOB_PATH = APP_DIR / "wb_job.json"
@@ -126,7 +129,7 @@ class RfbsListingApp(WbUiMixin):
         self.auto_job_workers_active = 0
         self.active_job_ids: set[str] = set()
         self.active_job_processes: dict[str, subprocess.Popen] = {}
-        self.active_product_groups: set[str] = set()
+        self.listing_worker_limit = 3
         self.parallel_subprocess_enabled = os.environ.get("OZON_PARALLEL_WORKER") != "1"
         self.active_job_id = ""
         self.prefetch_executor = ThreadPoolExecutor(max_workers=3, thread_name_prefix="ozon-prefetch")
@@ -161,7 +164,7 @@ class RfbsListingApp(WbUiMixin):
 
     @staticmethod
     def _new_offer_id() -> str:
-        return f"AUTO-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+        return f"AUTO-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:16].upper()}"
 
     def _generate_job_offer_id(self):
         offer_id = self._new_offer_id()
@@ -169,7 +172,7 @@ class RfbsListingApp(WbUiMixin):
         if getattr(self, "offer_id_hint_var", None) is not None:
             target_count = max(1, len(getattr(self, "multi_shop_targets", {})))
             hint = (
-                f"多店铺将使用 {offer_id}-1 至 {offer_id}-{target_count}"
+                f"多店铺将为 {offer_id} 分配每店固定货号，并生成独立主图"
                 if target_count > 1 else "已生成新货号"
             )
             self.offer_id_hint_var.set(hint)
@@ -620,7 +623,7 @@ class RfbsListingApp(WbUiMixin):
         ttk.Button(
             offer_frame, text="自动生成", command=self._generate_job_offer_id,
         ).grid(row=0, column=1, padx=(6, 0))
-        self.offer_id_hint_var = tk.StringVar(value="多店铺模式会自动追加不同编号")
+        self.offer_id_hint_var = tk.StringVar(value="多店铺模式会分配每店固定货号，并生成独立主图")
         ttk.Label(
             offer_frame, textvariable=self.offer_id_hint_var, foreground="#666",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 0))
@@ -748,10 +751,25 @@ class RfbsListingApp(WbUiMixin):
         ttk.Label(action, textvariable=self.auto_status_var, foreground="#245a8d").grid(row=1, column=1, sticky="w", pady=(5, 0))
         prefetch_controls = ttk.Frame(action)
         prefetch_controls.grid(row=0, column=2, rowspan=2, padx=(12, 0), sticky="e")
-        ttk.Label(prefetch_controls, text="并发预处理").pack(side=tk.LEFT)
+        listing_controls = ttk.Frame(prefetch_controls)
+        listing_controls.pack(anchor="e")
+        ttk.Label(listing_controls, text="同时上架数").pack(side=tk.LEFT)
+        self.listing_workers_var = tk.IntVar(value=self.listing_worker_limit)
+        self.listing_workers_spinbox = ttk.Spinbox(
+            listing_controls, from_=1, to=5, width=3,
+            textvariable=self.listing_workers_var, command=self._on_listing_workers_changed,
+        )
+        self.listing_workers_spinbox.pack(side=tk.LEFT, padx=(5, 0))
+        self.listing_workers_spinbox.bind("<Return>", self._on_listing_workers_changed)
+        self.listing_workers_spinbox.bind("<FocusOut>", self._on_listing_workers_changed)
+        self.concurrent_status_var = tk.StringVar(value="运行 0 / 3 · 排队 0")
+        ttk.Label(prefetch_controls, textvariable=self.concurrent_status_var).pack(anchor="e", pady=(2, 4))
+        source_controls = ttk.Frame(prefetch_controls)
+        source_controls.pack(anchor="e")
+        ttk.Label(source_controls, text="并发预处理").pack(side=tk.LEFT)
         self.prefetch_workers_var = tk.IntVar(value=3)
         ttk.Spinbox(
-            prefetch_controls, from_=1, to=5, width=3,
+            source_controls, from_=1, to=5, width=3,
             textvariable=self.prefetch_workers_var, command=self._reset_prefetch_executor,
         ).pack(side=tk.LEFT, padx=(5, 0))
         ttk.Label(
@@ -972,7 +990,7 @@ class RfbsListingApp(WbUiMixin):
             ("重量单位", "weight_unit", "g"), ("长度/深度", "depth", "100"),
             ("宽度", "width", "100"),
             ("高度", "height", "100"), ("尺寸单位", "dimension_unit", "mm"),
-            ("货号（Offer ID）", "offer_id", f"AUTO-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"),
+            ("货号（Offer ID）", "offer_id", self._new_offer_id()),
         ]
         row = 4
         for index in range(0, len(fields), 2):
@@ -1467,7 +1485,7 @@ class RfbsListingApp(WbUiMixin):
             base_offer = self._job_var("offer_id").get().strip()
             if getattr(self, "offer_id_hint_var", None) is not None:
                 self.offer_id_hint_var.set(
-                    f"实际货号：{base_offer}-1 至 {base_offer}-{len(ids)}"
+                    f"{len(ids)} 家店铺将分配固定货号并各生成一张独立 3:4 主图"
                     if len(ids) > 1 and base_offer else "单店直接使用当前货号"
                 )
             window.destroy()
@@ -2059,12 +2077,27 @@ class RfbsListingApp(WbUiMixin):
             inputs = dict(base_inputs)
             inputs.update(target)
             if len(targets) > 1 and base_offer_id:
-                suffix = f"-{variant_index + 1}"
-                inputs["offer_id"] = base_offer_id[:100 - len(suffix)].rstrip("-") + suffix
+                inputs["offer_id"] = shop_offer_id(base_offer_id, target["ozon_shop_id"])
+            inputs["base_offer_id"] = base_offer_id
             inputs["product_group_id"] = str(group_id)
             inputs["shop_variant_index"] = variant_index
+            inputs["shop_variant_count"] = len(targets)
+            inputs["unique_main_image"] = "1" if len(targets) > 1 else "0"
             expanded.append(inputs)
         return expanded
+
+    @staticmethod
+    def _merge_repaired_job_inputs(original: dict, edited: dict) -> dict:
+        # The repair form only contains editable fields. Keep batch identity and
+        # cover requirements when saving it, including after an application restart.
+        result = {**original, **edited}
+        if (
+            str(original.get("unique_main_image") or "0") == "1"
+            and original.get("base_offer_id")
+            and result.get("ozon_shop_id") != original.get("ozon_shop_id")
+        ):
+            result["offer_id"] = shop_offer_id(original["base_offer_id"], result["ozon_shop_id"])
+        return result
 
     def _job_inputs_from_form(self) -> dict:
         values = {}
@@ -2175,6 +2208,10 @@ class RfbsListingApp(WbUiMixin):
             raise ValueError("请先在“商品与图片”页面选择有效的水印文件")
         if local_mode and watermark_path and not Path(watermark_path).is_file():
             raise ValueError("已填写的水印文件不存在；请重新选择或留空")
+        if local_mode and str(values.get("unique_main_image") or "0") == "1":
+            image_config = self._config()["image"]
+            if not all(str(image_config.get(key) or "").strip() for key in ("api_url", "api_key", "model")):
+                raise ValueError("多店铺新品会为每店生成独立主图，请先填写生图 API 地址、密钥和模型")
         return category
 
     def _snapshot_local_job_images(self, paths, offer_id: str, job_id: str) -> list[str]:
@@ -2205,11 +2242,16 @@ class RfbsListingApp(WbUiMixin):
                 "version": 1,
                 "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "order": list(self.auto_job_order),
+                "listing_workers": getattr(self, "listing_worker_limit", 3),
                 "jobs": self.auto_jobs,
             })
 
     def _load_auto_jobs(self):
         payload = load_json(AUTO_JOBS_PATH, {})
+        if isinstance(payload, dict):
+            self.listing_worker_limit = self._bounded_worker_count(payload.get("listing_workers", 3))
+            if getattr(self, "listing_workers_var", None) is not None:
+                self.listing_workers_var.set(self.listing_worker_limit)
         jobs = payload.get("jobs") if isinstance(payload, dict) else {}
         order = payload.get("order") if isinstance(payload, dict) else []
         if not isinstance(jobs, dict):
@@ -2292,13 +2334,15 @@ class RfbsListingApp(WbUiMixin):
         if threading.current_thread() is not threading.main_thread():
             self.root.after(0, self._refresh_job_tree)
             return
+        selected = self.job_tree.selection()
+        with self.auto_job_lock:
+            jobs = [(job_id, copy.deepcopy(self.auto_jobs.get(job_id, {}))) for job_id in reversed(self.auto_job_order)]
         self.job_tree.delete(*self.job_tree.get_children())
         status_names = {
             "queued": "排队中", "running": "运行中", "failed": "待修复", "completed": "已完成",
             "stopping": "停止中", "cancelled": "已停止",
         }
-        for job_id in reversed(self.auto_job_order):
-            job = self.auto_jobs.get(job_id, {})
+        for job_id, job in jobs:
             values = job.get("inputs") or {}
             source = str(values.get("source_url") or "")
             article = re.search(r"\d{6,}", source)
@@ -2313,6 +2357,13 @@ class RfbsListingApp(WbUiMixin):
                 status_names.get(job.get("status"), str(job.get("status") or "")),
                 f"{int(job.get('stage') or 0)}/7", str(job.get("error") or job.get("message") or "")[:240],
             ))
+        remaining_selection = [job_id for job_id in selected if self.job_tree.exists(job_id)]
+        if remaining_selection:
+            self.job_tree.selection_set(remaining_selection)
+        if getattr(self, "concurrent_status_var", None) is not None:
+            running = sum(job.get("status") in {"running", "stopping"} for _, job in jobs)
+            queued = sum(job.get("status") == "queued" for _, job in jobs)
+            self.concurrent_status_var.set(f"运行 {running} / {self._listing_concurrency()} · 排队 {queued}")
 
     def _enqueue_job_from_form(self):
         try:
@@ -2345,7 +2396,7 @@ class RfbsListingApp(WbUiMixin):
             f"填写的标准佣金：{inputs['sales_commission_percent']}%\n"
             f"采购成本 / 贴单费 / 目标 ROI：{inputs['purchase_cost']} / {inputs['label_fee']} / {inputs['target_roi']}%\n"
             f"类目：{category['display']}\n\n"
-            "加入后会在后台按顺序自动上架；你可以立即继续填写下一件商品。是否加入队列？"
+            f"加入后最多 {self._listing_concurrency()} 个任务同时上架；你可以立即继续填写下一件商品。是否加入队列？"
         )
         if not messagebox.askyesno("加入自动上架队列", summary):
             return
@@ -2392,17 +2443,40 @@ class RfbsListingApp(WbUiMixin):
         )
         self._start_auto_job_worker()
 
-    def _start_auto_job_worker(self):
+    @staticmethod
+    def _bounded_worker_count(value) -> int:
         try:
-            desired = max(1, min(5, int(self.prefetch_workers_var.get())))
+            return max(1, min(5, int(value)))
         except (TypeError, ValueError, tk.TclError):
-            desired = 3
+            return 3
+
+    def _listing_concurrency(self) -> int:
+        if not getattr(self, "parallel_subprocess_enabled", False):
+            return 1
+        return self._bounded_worker_count(getattr(self, "listing_worker_limit", 3))
+
+    def _on_listing_workers_changed(self, _event=None):
+        try:
+            value = self.listing_workers_var.get()
+        except tk.TclError:
+            value = 3
+        self.listing_worker_limit = self._bounded_worker_count(value)
+        self.listing_workers_var.set(self.listing_worker_limit)
+        self._save_auto_jobs()
+        self._refresh_job_tree()
+        if not self.auto_job_queue.empty():
+            self._start_auto_job_worker()
+
+    def _start_auto_job_worker(self):
+        desired = self._listing_concurrency()
         with self.auto_job_lock:
+            if self.auto_job_queue.empty() or getattr(self, "_closing", False):
+                return
             self.auto_job_worker_running = True
             missing = max(0, desired - self.auto_job_workers_active)
             self.auto_job_workers_active += missing
         for _index in range(missing):
-            threading.Thread(target=self._auto_job_worker, daemon=True).start()
+            threading.Thread(target=self._auto_job_worker, name="ozon-listing-worker", daemon=True).start()
 
     def _reset_prefetch_executor(self):
         try:
@@ -2468,38 +2542,33 @@ class RfbsListingApp(WbUiMixin):
 
     def _auto_job_worker(self):
         self.busy = True
-        if not hasattr(self, "active_product_groups"):
-            self.active_product_groups = set()
+        retired = False
         if not hasattr(self, "active_job_ids"):
             self.active_job_ids = set()
         if not hasattr(self, "active_job_processes"):
             self.active_job_processes = {}
         try:
             while True:
-                try:
-                    job_id = self.auto_job_queue.get_nowait()
-                except queue.Empty:
-                    break
                 with self.auto_job_lock:
+                    if getattr(self, "auto_job_workers_active", 1) > self._listing_concurrency():
+                        self.auto_job_workers_active -= 1
+                        retired = True
+                        break
+                    try:
+                        job_id = self.auto_job_queue.get_nowait()
+                    except queue.Empty:
+                        break
                     job = self.auto_jobs.get(job_id)
                     should_skip = not job or job.get("status") != "queued"
                     if not should_skip:
-                        inputs = job.get("inputs") or {}
-                        group_id = str(inputs.get("product_group_id") or job_id)
-                        if group_id in self.active_product_groups:
-                            self.auto_job_queue.put(job_id)
-                            should_skip = True
-                        else:
-                            self.active_product_groups.add(group_id)
-                            self.active_job_ids.add(job_id)
-                            job["status"] = "running"
-                            job["cancel_requested"] = False
-                            job["error"] = ""
-                            job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-                            self._save_auto_jobs()
+                        self.active_job_ids.add(job_id)
+                        job["status"] = "running"
+                        job["cancel_requested"] = False
+                        job["error"] = ""
+                        job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                        self._save_auto_jobs()
                 if should_skip:
                     self.auto_job_queue.task_done()
-                    time.sleep(0.15)
                     continue
                 self._refresh_job_tree()
                 try:
@@ -2513,54 +2582,88 @@ class RfbsListingApp(WbUiMixin):
                             "message": "上架、RFBS 库存和 Excel 台账已完成",
                         })
                 except AutoJobCancelled as error:
-                    job["status"] = "cancelled"
-                    job["cancel_requested"] = False
-                    job["error"] = ""
-                    job["message"] = str(error) or "任务已按要求停止"
+                    with self.auto_job_lock:
+                        job["status"] = "cancelled"
+                        job["cancel_requested"] = False
+                        job["error"] = ""
+                        job["message"] = str(error) or "任务已按要求停止"
                 except Exception as error:
-                    job["status"] = "failed"
-                    job["failed_stage"] = min(7, int(job.get("stage") or 0) + 1)
-                    job["error"] = str(error) or type(error).__name__
-                    job["message"] = "点击“修复选中任务”修改后继续"
+                    with self.auto_job_lock:
+                        job["status"] = "failed"
+                        job["failed_stage"] = min(7, int(job.get("stage") or 0) + 1)
+                        job["error"] = str(error) or type(error).__name__
+                        job["message"] = "点击“修复选中任务”修改后继续"
                     self._log(f"任务 {job.get('inputs', {}).get('offer_id')} 已暂停待修复：{job['error']}")
                 finally:
-                    group_id = str((job.get("inputs") or {}).get("product_group_id") or job_id)
                     with self.auto_job_lock:
-                        self.active_product_groups.discard(group_id)
                         self.active_job_ids.discard(job_id)
                         self.active_job_processes.pop(job_id, None)
-                    job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-                    self._save_auto_jobs()
+                        job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                        self._save_auto_jobs()
                     self._refresh_job_tree()
                     self.auto_job_queue.task_done()
         finally:
             with self.auto_job_lock:
-                self.auto_job_workers_active = max(0, getattr(self, "auto_job_workers_active", 1) - 1)
+                if not retired:
+                    self.auto_job_workers_active = max(0, getattr(self, "auto_job_workers_active", 1) - 1)
                 self.auto_job_worker_running = self.auto_job_workers_active > 0
                 self.busy = self.auto_job_worker_running
             if not self.auto_job_worker_running:
                 self.root.after(0, lambda: self.auto_status_var.set("队列当前已处理完；可继续加入产品或修复失败任务"))
+            if not self.auto_job_queue.empty() and not getattr(self, "_closing", False):
+                self.root.after(0, self._start_auto_job_worker)
 
-    def _run_job_subprocess(self, job: dict):
-        job_id = str(job["id"])
+    def _parallel_job_snapshot(self, job: dict) -> dict:
+        """Copy reusable product data, never alias another shop's mutable state."""
         inputs = job.get("inputs") or {}
         group_id = str(inputs.get("product_group_id") or "")
-        if group_id and int(job.get("stage") or 0) < 2:
+        if group_id and not self._local_listing_enabled(inputs) and int(job.get("stage") or 0) < 2:
             for other in self.auto_jobs.values():
                 other_inputs = other.get("inputs") or {}
                 if other is job or str(other_inputs.get("product_group_id") or "") != group_id:
                     continue
                 if int(other.get("stage") or 0) >= 2 and isinstance(other.get("state"), dict):
-                    job["state"] = other["state"]
+                    job["state"] = copy.deepcopy(other["state"])
+                    job["state"]["local_images"] = list(job["state"].get("source_images") or [])
+                    job["state"]["uploaded_urls"] = []
                     job["stage"] = 2
                     job["message"] = "已复用同商品采集、原图和文案"
                     break
+        group_future = getattr(self, "prefetch_futures", {}).get(group_id)
+        if int(job.get("stage") or 0) == 0 and group_future is not None and group_future.done():
+            try:
+                prefetched = group_future.result()
+            except Exception:
+                prefetched = None
+            if isinstance(prefetched, dict) and prefetched:
+                job["prefetch_state"] = copy.deepcopy(prefetched)
+        return copy.deepcopy(job)
+
+    def _apply_parallel_job_progress(self, job: dict, progress_job: dict, *, final=False):
+        if str(progress_job.get("id") or "") != str(job.get("id") or ""):
+            raise ValueError("并行任务回传的任务 ID 不匹配")
+        stopping = job.get("status") == "stopping" or job.get("cancel_requested")
+        job.update(copy.deepcopy(progress_job))
+        if stopping and not (final and job.get("status") in {"completed", "cancelled"}):
+            job["status"] = "stopping"
+            job["cancel_requested"] = True
+        elif not final:
+            job["status"] = "running"
+
+    def _run_job_subprocess(self, job: dict):
+        job_id = str(job["id"])
         work_dir = APP_DIR / "parallel-jobs"
         work_dir.mkdir(parents=True, exist_ok=True)
         request_path = work_dir / f"{job_id}.request.json"
         result_path = work_dir / f"{job_id}.result.json"
-        result_path.unlink(missing_ok=True)
-        atomic_write_json(request_path, {"job": job})
+        cancel_path = work_dir / f"{job_id}.cancel.json"
+        with self.auto_job_lock:
+            self._check_auto_job_cancelled(job)
+            result_path.unlink(missing_ok=True)
+            cancel_path.unlink(missing_ok=True)
+            atomic_write_json(request_path, {
+                "job": self._parallel_job_snapshot(job), "cancel_path": str(cancel_path),
+            })
         if getattr(sys, "frozen", False):
             command = [sys.executable, "--parallel-job-worker", str(request_path), str(result_path)]
         else:
@@ -2570,23 +2673,26 @@ class RfbsListingApp(WbUiMixin):
         process = subprocess.Popen(command, env=environment, creationflags=subprocess.CREATE_NO_WINDOW)
         with self.auto_job_lock:
             self.active_job_processes[job_id] = process
+        last_progress = None
         while process.poll() is None:
             time.sleep(0.4)
             progress = load_json(result_path, {})
             progress_job = progress.get("job") if isinstance(progress, dict) else None
-            if isinstance(progress_job, dict):
+            if isinstance(progress_job, dict) and progress_job != last_progress:
+                last_progress = copy.deepcopy(progress_job)
                 with self.auto_job_lock:
-                    job.update(progress_job)
-                    job["status"] = "running"
+                    self._apply_parallel_job_progress(job, progress_job)
+                    self._save_auto_jobs()
                 self._refresh_job_tree()
         exit_code = int(process.returncode or 0)
         payload = load_json(result_path, {})
         returned_job = payload.get("job") if isinstance(payload, dict) else None
         if isinstance(returned_job, dict):
-            job.clear()
-            job.update(returned_job)
+            with self.auto_job_lock:
+                self._apply_parallel_job_progress(job, returned_job, final=True)
         request_path.unlink(missing_ok=True)
         result_path.unlink(missing_ok=True)
+        cancel_path.unlink(missing_ok=True)
         if exit_code != 0 or not payload.get("ok"):
             if job.get("status") == "stopping":
                 job["status"] = "cancelled"
@@ -2762,11 +2868,14 @@ class RfbsListingApp(WbUiMixin):
             if stage < 3:
                 cancel_check()
                 if local_mode:
-                    amazon_main = str((job.get("inputs") or {}).get("amazon_generate_main") or "0") == "1"
-                    if amazon_main:
-                        self._set_auto_progress(3, f"{offer_id}：生成 3:4 Ozon 亚马逊新品主图")
+                    image_inputs = job.get("inputs") or {}
+                    generated_main = any(str(image_inputs.get(key) or "0") == "1" for key in (
+                        "amazon_generate_main", "unique_main_image",
+                    ))
+                    if generated_main:
+                        self._set_auto_progress(3, f"{offer_id}：生成店铺独立 3:4 Ozon 新品主图")
                         self._retry_step(
-                            "亚马逊新品主图生成", self._generate_amazon_local_main,
+                            "新品独立主图生成", self._generate_amazon_local_main,
                             attempts=2, delay_seconds=4, cancel_check=cancel_check,
                         )
                     else:
@@ -3008,9 +3117,10 @@ class RfbsListingApp(WbUiMixin):
             job["error"] = ""
             job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             self._save_auto_jobs()
-            process = getattr(self, "active_job_processes", {}).get(str(job.get("id") or ""))
-            if process is not None and process.poll() is None:
-                process.terminate()
+            if status in {"running", "stopping"} and getattr(self, "parallel_subprocess_enabled", False):
+                # Let a running network operation finish and persist its response
+                # before cancelling; forcibly killing it can lose an import ID.
+                atomic_write_json(APP_DIR / "parallel-jobs" / f"{job['id']}.cancel.json", {"cancel": True})
         self._refresh_job_tree()
 
     def _retry_selected_job(self):
@@ -3797,6 +3907,7 @@ class RfbsListingApp(WbUiMixin):
             if selected_repair_shop_id:
                 updated_inputs["ozon_shop_id"] = selected_repair_shop_id
                 updated_inputs["ozon_shop_name"] = self.ozon_shops[selected_repair_shop_id]["name"]
+            updated_inputs = self._merge_repaired_job_inputs(job.get("inputs") or {}, updated_inputs)
             category = self.category_by_display.get(updated_inputs.get("category_display", ""))
             if category:
                 updated_inputs["category_id"] = str(category["description_category_id"])
@@ -3860,10 +3971,10 @@ class RfbsListingApp(WbUiMixin):
             ):
                 stage = 0
                 job["state"] = {}
+            elif changed_input_keys.intersection({"watermark_path", "image_prompt", "ozon_shop_id"}):
+                stage = min(stage, 2)
             elif any(updated_inputs.get(key) != old_inputs.get(key) for key in ("category_display", "category_id", "type_id", "net_weight")):
                 stage = min(stage, 4)
-            elif changed_input_keys.intersection({"watermark_path", "image_prompt"}):
-                stage = min(stage, 2)
             elif submission_inputs_changed or content_changed:
                 stage = min(stage, 5)
             existing_task_id = int(job.get("task_id") or 0)
@@ -3902,6 +4013,8 @@ class RfbsListingApp(WbUiMixin):
             job["inputs"] = updated_inputs
             job["state"] = repaired_state
             job["stage"] = stage
+            if stage < 3:
+                job.pop("variant", None)
             if updated_inputs.get("offer_id") != old_inputs.get("offer_id") or stage < 6:
                 job["task_id"] = 0
                 job["import_completed"] = False
@@ -4077,7 +4190,14 @@ class RfbsListingApp(WbUiMixin):
         self.root.after(100, self._poll_log)
 
     def _parse_url(self):
-        reference = scrape_reference(self.vars["source_url"].get().strip(), log_func=self._log)
+        job_id = str(getattr(self, "active_job_id", "") or "")
+        profile_dir = (
+            APP_DIR / "browser_profiles_parallel" / hashlib.sha256(job_id.encode()).hexdigest()[:20]
+            if job_id else None
+        )
+        reference = scrape_reference(
+            self.vars["source_url"].get().strip(), log_func=self._log, profile_dir=profile_dir,
+        )
         if not reference.images:
             raise RuntimeError("Ozon 页面已读取到商品信息，但图库仍未加载完成；程序没有采用上一个商品的图片")
         paths, output_dir = self._download_reference_images(reference)
@@ -4246,7 +4366,7 @@ class RfbsListingApp(WbUiMixin):
         )
 
     def _active_job_inputs(self) -> dict:
-        job = self.auto_jobs.get(str(getattr(self, "active_job_id", "") or ""), {})
+        job = getattr(self, "auto_jobs", {}).get(str(getattr(self, "active_job_id", "") or ""), {})
         inputs = job.get("inputs") if isinstance(job.get("inputs"), dict) else {}
         return inputs
 
@@ -4264,27 +4384,65 @@ class RfbsListingApp(WbUiMixin):
             index = int(inputs.get("shop_variant_index") or 0)
         except (TypeError, ValueError):
             index = 0
+        shop_id = str(inputs.get("ozon_shop_id") or "").strip()
+        if shop_id:
+            index = int(hashlib.sha256(shop_id.encode()).hexdigest()[:8], 16)
         return directions[index % len(directions)] + f" This is storefront cover variant {index + 1}."
 
-    def _existing_group_main_hashes(self, inputs: dict) -> set[str]:
+    def _generate_storefront_images(self, service, references, primary_index, prompt, watermark, folder):
+        inputs = self._active_job_inputs()
         group_id = str(inputs.get("product_group_id") or "").strip()
-        if not group_id:
-            return set()
-        hashes = set()
-        for job_id, job in self.auto_jobs.items():
-            if job_id == self.active_job_id:
+        shop_id = str(inputs.get("ozon_shop_id") or "").strip()
+        registry = ShopVariantRegistry(SHOP_VARIANTS_PATH) if group_id and shop_id else None
+        output_dir = variant_directory(
+            OUTPUT_DIR / folder, group_id or "manual", shop_id or "single",
+        )
+        primary = references[primary_index]
+        fingerprint = hashlib.sha256(json.dumps({
+            "reference": hashlib.sha256(Path(primary).read_bytes()).hexdigest(),
+            "prompt": prompt, "model": service.model, "api_url": service.api_url,
+            "watermark": hashlib.sha256(Path(watermark).read_bytes()).hexdigest() if watermark else "",
+        }, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        attachments = [path for index, path in enumerate(references) if index != primary_index][:14]
+        cached = registry.cached_main(group_id, shop_id, fingerprint) if registry else None
+        if cached:
+            paths = attachments
+            if watermark and paths:
+                paths = WatermarkService.apply(paths, watermark, str(output_dir / uuid.uuid4().hex / "attachments"))
+            self._log("已复用该店铺通过差异校验的主图，继续当前任务")
+            self._record_storefront_variant(inputs, cached, fingerprint)
+            return [cached, *paths]
+        for attempt in range(3):
+            attempt_dir = output_dir / uuid.uuid4().hex
+            retry_prompt = prompt if attempt == 0 else prompt + (
+                f" Retry {attempt}: create a clearly different composition, background and lighting "
+                "from earlier storefront covers. Preserve the exact product, color, shape and contents."
+            )
+            generated = service.generate([primary], retry_prompt, 1, str(attempt_dir / "generated"), exact_3_4=True)
+            paths = [generated[0], *attachments]
+            if watermark:
+                paths = WatermarkService.apply(paths, watermark, str(attempt_dir / "ready"))
+            try:
+                if registry:
+                    registry.register_main(group_id, shop_id, fingerprint, paths[0])
+            except DuplicateMainImageError:
+                self._log(f"店铺主图差异校验未通过（第 {attempt + 1}/3 次）")
                 continue
-            other_inputs = job.get("inputs") if isinstance(job.get("inputs"), dict) else {}
-            if str(other_inputs.get("product_group_id") or "") != group_id:
-                continue
-            state = job.get("state") if isinstance(job.get("state"), dict) else {}
-            paths = state.get("local_images") if isinstance(state.get("local_images"), list) else []
-            if not paths:
-                continue
-            path = Path(str(paths[0]))
-            if path.is_file():
-                hashes.add(hashlib.sha256(path.read_bytes()).hexdigest())
-        return hashes
+            self._record_storefront_variant(inputs, paths[0], fingerprint)
+            return paths
+        raise RuntimeError("生图服务连续返回相同或过于相似的主图；任务已暂停，请修改主图提示词后重试")
+
+    def _record_storefront_variant(self, inputs, main_image, fingerprint):
+        job = getattr(self, "auto_jobs", {}).get(str(getattr(self, "active_job_id", "") or ""))
+        if job is not None:
+            job["variant"] = {
+                "base_offer_id": inputs.get("base_offer_id", inputs.get("offer_id", "")),
+                "offer_id": inputs.get("offer_id", ""), "shop_id": inputs.get("ozon_shop_id", ""),
+                "main_image": main_image,
+                "main_image_sha256": hashlib.sha256(Path(main_image).read_bytes()).hexdigest(),
+                "fingerprint": fingerprint, "checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            self._save_auto_jobs()
 
     def _generate_images(self):
         references = self.source_images or self.local_images
@@ -4299,7 +4457,6 @@ class RfbsListingApp(WbUiMixin):
             self.root.after(0, lambda: self.vars["image_api_url"].set(service.api_url))
             self._log("生图接口地址已自动补全为：" + service.api_url)
         primary_index = self.primary_reference_index if self.primary_reference_index < len(references) else 0
-        primary_reference = references[primary_index]
         analysis = self._ensure_vision_analysis()
         poster_lines = [
             str(line).strip() for line in analysis.get("poster_text_lines_ru", [])
@@ -4318,30 +4475,8 @@ class RfbsListingApp(WbUiMixin):
         # As in the reference generator, the SKU cover receives exactly one
         # product-authority image.  Multiple uploads encourage variant mixing
         # and collage layouts; the remaining originals stay as attachments.
-        active_inputs = self._active_job_inputs()
-        safe_group = re.sub(
-            r"[^A-Za-z0-9._-]+", "_", str(active_inputs.get("product_group_id") or "manual")
-        ).strip("._-") or "manual"
-        safe_shop = re.sub(
-            r"[^A-Za-z0-9._-]+", "_", str(active_inputs.get("ozon_shop_id") or "single")
-        ).strip("._-") or "single"
-        output_dir = OUTPUT_DIR / "generated-main" / safe_group / safe_shop
-        generated = service.generate([primary_reference], prompt, 1, str(output_dir))
-        existing_hashes = self._existing_group_main_hashes(active_inputs)
-        generated_hash = hashlib.sha256(Path(generated[0]).read_bytes()).hexdigest()
-        if generated_hash in existing_hashes:
-            retry_prompt = prompt + " Create a visibly different camera angle and layout from every earlier storefront cover."
-            generated = service.generate([primary_reference], retry_prompt, 1, str(output_dir / "unique-retry"))
-            generated_hash = hashlib.sha256(Path(generated[0]).read_bytes()).hexdigest()
-            if generated_hash in existing_hashes:
-                raise RuntimeError("生图服务连续返回相同主图；为避免多店铺主图重复，任务已停止，请重试")
-        attachments = [
-            path for index, path in enumerate(references)
-            if index != primary_index
-        ][:14]
-        final_sources = [generated[0], *attachments]
-        paths = WatermarkService.apply(
-            final_sources, watermark, str(OUTPUT_DIR / "ready-to-upload" / safe_group / safe_shop),
+        paths = self._generate_storefront_images(
+            service, references, primary_index, prompt, watermark, "generated-main",
         )
         self._replace_images(paths)
         self.uploaded_urls = []
@@ -4365,7 +4500,11 @@ class RfbsListingApp(WbUiMixin):
             if not Path(watermark).is_file():
                 raise FileNotFoundError("已填写的水印文件不存在；请重新选择或留空")
             paths = WatermarkService.apply(
-                ordered, watermark, str(OUTPUT_DIR / "local-ready-to-upload"),
+                ordered, watermark, str(variant_directory(
+                    OUTPUT_DIR / "local-ready-to-upload",
+                    self._active_job_inputs().get("product_group_id") or uuid.uuid4().hex,
+                    self._active_job_inputs().get("ozon_shop_id") or "single",
+                )),
             )
             message = f"本地新品 {len(paths)} 张成品图已添加水印，未调用图片生成服务"
         else:
@@ -4378,7 +4517,7 @@ class RfbsListingApp(WbUiMixin):
     def _generate_amazon_local_main(self):
         references = list(self.source_images or self.local_images)[:15]
         if not references:
-            raise ValueError("请先从亚马逊获取并选择至少 1 张图片")
+            raise ValueError("请先为新品选择至少 1 张商品图片")
         cfg = self._config()["image"]
         service = ImageGenerationService(cfg["api_url"], cfg["api_key"], cfg["model"])
         if service.api_url != cfg["api_url"].rstrip("/"):
@@ -4394,31 +4533,23 @@ class RfbsListingApp(WbUiMixin):
         direction = "\n".join(filter(None, [
             str(analysis.get("art_direction_en") or "").strip(),
             self.vars["image_prompt"].get().strip(),
+            self._shop_main_image_direction(self._active_job_inputs()),
             "Create an exact 3:4 portrait Ozon marketplace hero image optimized for high click-through rate. "
             "Keep one complete, accurate product as the dominant focal point, with clean premium contrast, "
             "mobile-readable Russian text, strong visual hierarchy and generous safe margins. No collage, "
             "no duplicate product, no Amazon branding, badges, ratings, seller marks or invented features.",
         ]))
         prompt = build_ozon_main_image_prompt(direction, poster_lines)
-        generated = service.generate(
-            [references[primary_index]], prompt, 1,
-            str(OUTPUT_DIR / "amazon-generated-main"), exact_3_4=True,
-        )
-        attachments = [
-            path for index, path in enumerate(references) if index != primary_index
-        ][:14]
-        final_sources = [generated[0], *attachments]
         watermark = self.vars["watermark_path"].get().strip()
-        if watermark:
-            if not Path(watermark).is_file():
-                raise FileNotFoundError("已填写的水印文件不存在；请重新选择或留空")
-            final_sources = WatermarkService.apply(
-                final_sources, watermark, str(OUTPUT_DIR / "amazon-ready-to-upload"),
-            )
+        if watermark and not Path(watermark).is_file():
+            raise FileNotFoundError("已填写的水印文件不存在；请重新选择或留空")
+        final_sources = self._generate_storefront_images(
+            service, references, primary_index, prompt, watermark, "new-product-main",
+        )
         self._replace_images(final_sources)
         self.uploaded_urls = []
         self._log(
-            f"亚马逊第 {primary_index + 1} 张图片已作为唯一主体参考，"
+            f"新品第 {primary_index + 1} 张图片已作为唯一主体参考，"
             f"生成精确 3:4 Ozon 高点击主图；保留编号附图 {len(final_sources) - 1} 张"
         )
 

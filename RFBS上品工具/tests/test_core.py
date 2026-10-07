@@ -22,6 +22,7 @@ sys.path.insert(0, str(APP_DIR))
 from core import ProductInput, ReferenceProduct, attribute_values_by_id, build_import_item, calculate_price_breakdown, calculate_roi_price, calculate_shipping, clean_attribute_payload, complete_ozon_hashtags, extract_hashtags, extract_reference_article, find_reference_fact, flatten_categories, format_ozon_hashtags, normalize_reference_input, parse_attributes, parse_complex_attributes, parse_ozon_hashtags, parse_reference_html, prefer_high_resolution_image_url, rank_categories, recommend_category, scrape_reference, set_attribute_value, unsupported_chinese_submission_fields, validate_ozon_hashtags, validate_required
 from services import CopywritingService, ImageDownloadService, ImageGenerationService, OzonApi, OzonDictionaryCache, ProductVisionAnalysisService, WatermarkService, build_oss_object_keys, build_ozon_main_image_prompt, build_ozon_poster_text_lines, normalize_chat_completions_url, normalize_image_edits_url, visual_attribute_allowed
 from app import AutoJobCancelled, RfbsListingApp, WORKSPACE_FIELD_KEYS
+from shop_variants import shop_offer_id
 
 
 class CoreTests(unittest.TestCase):
@@ -1533,11 +1534,19 @@ class CoreTests(unittest.TestCase):
             [("shop-a", "1001"), ("shop-b", "2002")],
         )
         self.assertEqual(
-            [item["offer_id"] for item in expanded], ["SAME-SKU-1", "SAME-SKU-2"],
+            [item["offer_id"] for item in expanded],
+            [shop_offer_id("SAME-SKU", "shop-a"), shop_offer_id("SAME-SKU", "shop-b")],
         )
         self.assertEqual(len({item["offer_id"] for item in expanded}), 2)
         self.assertEqual({item["product_group_id"] for item in expanded}, {"group-1"})
         self.assertEqual([item["shop_variant_index"] for item in expanded], [0, 1])
+        self.assertTrue(all(item["unique_main_image"] == "1" for item in expanded))
+        app.ozon_shops = dict(reversed(list(app.ozon_shops.items())))
+        reordered = app._expand_job_inputs_for_shops({"offer_id": "SAME-SKU"}, "group-2")
+        self.assertEqual(
+            {item["ozon_shop_id"]: item["offer_id"] for item in reordered},
+            {item["ozon_shop_id"]: item["offer_id"] for item in expanded},
+        )
 
     def test_single_shop_keeps_base_offer_id_and_generator_is_unique(self):
         app = RfbsListingApp.__new__(RfbsListingApp)
@@ -1549,7 +1558,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(expanded[0]["offer_id"], "BASE-SKU")
         first = RfbsListingApp._new_offer_id()
         second = RfbsListingApp._new_offer_id()
-        self.assertRegex(first, r"^AUTO-\d{8}-[A-F0-9]{6}$")
+        self.assertRegex(first, r"^AUTO-\d{8}-[A-F0-9]{16}$")
         self.assertNotEqual(first, second)
 
     def test_empty_offer_id_is_generated_automatically_from_form(self):
@@ -1568,7 +1577,7 @@ class CoreTests(unittest.TestCase):
         app.ozon_shops = {}
         app.job_form_image_paths = []
         values = app._job_inputs_from_form()
-        self.assertRegex(values["offer_id"], r"^AUTO-\d{8}-[A-F0-9]{6}$")
+        self.assertRegex(values["offer_id"], r"^AUTO-\d{8}-[A-F0-9]{16}$")
         self.assertEqual(app.job_form_vars["offer_id"].get(), values["offer_id"])
 
     def test_follow_shop_reuses_best_group_collection_checkpoint(self):
