@@ -29,3 +29,5 @@ build/
 outputs/
 diagnostic-backup/
 .supabase/
+# Local product materials and downloaded installers; keep them on this computer.
+/新建文件夹/
