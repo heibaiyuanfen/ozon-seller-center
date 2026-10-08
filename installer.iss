@@ -1,5 +1,5 @@
 #define MyAppName "Ozon RFBS 上品工具"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "2026.09.18.1"
 #define MyAppPublisher "heibaiyuanfen"
 #define MyAppExeName "Ozon_RFBS上品工具.exe"
 
@@ -15,7 +15,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=安装包
-OutputBaseFilename=Ozon_RFBS上品工具_完整数据安装版
+OutputBaseFilename=Ozon_RFBS上品工具_20260918_采集修复完整安装版
 Compression=lzma2/max
 SolidCompression=yes
 LZMANumBlockThreads=4

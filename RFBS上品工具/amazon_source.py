@@ -141,6 +141,7 @@ def scrape_amazon_product(
         raise RuntimeError(f"亚马逊页面未返回完整图库：{direct_error}") from direct_error
     try:
         from playwright.sync_api import sync_playwright
+        from browser_runtime import chromium_launch_candidates
     except ImportError as error:
         raise RuntimeError("亚马逊直连解析失败，且未安装浏览器解析组件 playwright") from error
     profile = Path(browser_profile_dir)
@@ -148,10 +149,10 @@ def scrape_amazon_product(
     with sync_playwright() as playwright:
         context = None
         last_error = None
-        for channel in ("msedge", "chrome"):
+        for browser_options in chromium_launch_candidates():
             try:
                 context = playwright.chromium.launch_persistent_context(
-                    str(profile), channel=channel, headless=False, locale="en-US",
+                    str(profile), **browser_options, headless=False, locale="en-US",
                     viewport={"width": 1360, "height": 900},
                     args=["--disable-blink-features=AutomationControlled"],
                 )
@@ -159,7 +160,7 @@ def scrape_amazon_product(
             except Exception as error:
                 last_error = error
         if context is None:
-            raise RuntimeError(f"无法启动 Edge/Chrome 解析亚马逊：{last_error}")
+            raise RuntimeError(f"无法启动内置 Chromium/Edge/Chrome 解析亚马逊：{last_error}")
         try:
             page = context.pages[0] if context.pages else context.new_page()
             try:
@@ -180,7 +181,10 @@ def scrape_amazon_product(
                 f"亚马逊页面在 {timeout} 秒内未加载完整图库；如出现验证码，请完成验证后重试：{last_parse_error}"
             )
         finally:
-            context.close()
+            try:
+                context.close()
+            except Exception:
+                pass
 
 
 def download_amazon_images(

@@ -564,9 +564,10 @@ def parse_reference_html(url: str, page: str) -> ReferenceProduct:
 def scrape_reference_browser(
     url: str, *, timeout=180, log_func=None, profile_dir: str | Path | None = None,
 ) -> ReferenceProduct:
-    """Load a blocked storefront page in a visible, dedicated Edge profile."""
+    """Load a blocked storefront page in a visible, dedicated browser profile."""
     try:
         from playwright.sync_api import sync_playwright
+        from browser_runtime import chromium_launch_candidates
     except ImportError as error:
         raise RuntimeError("Ozon 拒绝了直接解析；请先安装浏览器解析组件：pip install playwright") from error
 
@@ -574,14 +575,14 @@ def scrape_reference_browser(
     requested_article = extract_reference_article(url)
     profile_dir.mkdir(parents=True, exist_ok=True)
     if log_func:
-        log_func("Ozon 直连页面未返回完整商品图库，正在打开专用 Edge 窗口补抓。若出现验证页面，请完成验证并等待自动解析。")
+        log_func("Ozon 直连页面未返回完整商品图库，正在打开专用浏览器窗口补抓。若出现验证页面，请完成验证并等待自动解析。")
     with sync_playwright() as playwright:
         last_error = None
         context = None
-        for channel in ("msedge", "chrome"):
+        for browser_options in chromium_launch_candidates():
             try:
                 context = playwright.chromium.launch_persistent_context(
-                    str(profile_dir), channel=channel, headless=False, locale="ru-RU",
+                    str(profile_dir), **browser_options, headless=False, locale="ru-RU",
                     viewport={"width": 1360, "height": 900},
                     args=["--disable-blink-features=AutomationControlled"],
                 )
@@ -589,7 +590,7 @@ def scrape_reference_browser(
             except Exception as error:
                 last_error = error
         if context is None:
-            raise RuntimeError(f"无法启动 Edge/Chrome 浏览器：{last_error}")
+            raise RuntimeError(f"无法启动内置 Chromium/Edge/Chrome 浏览器：{last_error}")
         try:
             browser_page = context.pages[0] if context.pages else context.new_page()
             try:
@@ -850,7 +851,12 @@ def scrape_reference_browser(
                 browser_page.wait_for_timeout(1000)
             raise RuntimeError("等待 Ozon 页面或人工验证超时；请确认浏览器中能正常打开该商品")
         finally:
-            context.close()
+            try:
+                context.close()
+            except Exception:
+                # The browser may already have exited or been closed by the
+                # user. Cleanup must not replace the real scrape result/error.
+                pass
 
 
 def scrape_reference(

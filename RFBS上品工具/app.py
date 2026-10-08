@@ -2652,6 +2652,15 @@ class RfbsListingApp(WbUiMixin):
 
     def _run_job_subprocess(self, job: dict):
         job_id = str(job["id"])
+        inputs = job.get("inputs") or {}
+        group_id = str(inputs.get("product_group_id") or job_id)
+        if int(job.get("stage") or 0) == 0 and not self._local_listing_enabled(inputs):
+            future = self.prefetch_futures.get(group_id)
+            if future is not None:
+                try:
+                    future.result(timeout=190)
+                except Exception as error:
+                    job["prefetch_error"] = str(error)
         work_dir = APP_DIR / "parallel-jobs"
         work_dir.mkdir(parents=True, exist_ok=True)
         request_path = work_dir / f"{job_id}.request.json"

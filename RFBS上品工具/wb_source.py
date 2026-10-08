@@ -222,6 +222,7 @@ def scrape_wb_source_browser(
 ) -> WbSourceProduct:
     try:
         from playwright.sync_api import sync_playwright
+        from browser_runtime import chromium_launch_candidates
     except ImportError as error:
         raise RuntimeError("请安装浏览器解析组件：pip install playwright") from error
 
@@ -233,11 +234,11 @@ def scrape_wb_source_browser(
     with sync_playwright() as playwright:
         context = None
         last_error: Exception | None = None
-        for channel in ("msedge", "chrome"):
+        for browser_options in chromium_launch_candidates():
             try:
                 context = playwright.chromium.launch_persistent_context(
                     str(profile),
-                    channel=channel,
+                    **browser_options,
                     headless=False,
                     locale="ru-RU",
                     viewport={"width": 1360, "height": 900},
@@ -247,7 +248,7 @@ def scrape_wb_source_browser(
             except Exception as error:
                 last_error = error
         if context is None:
-            raise RuntimeError(f"无法启动 Edge/Chrome 浏览器：{last_error}")
+            raise RuntimeError(f"无法启动内置 Chromium/Edge/Chrome 浏览器：{last_error}")
         try:
             browser_page = context.pages[0] if context.pages else context.new_page()
             try:
@@ -297,7 +298,10 @@ def scrape_wb_source_browser(
                 return best
             raise RuntimeError("未能从 WB 页面读取完整标题和商品图片；请在浏览器中完成人机验证后重试")
         finally:
-            context.close()
+            try:
+                context.close()
+            except Exception:
+                pass
 
 
 def scrape_wb_source(

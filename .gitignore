@@ -26,6 +26,7 @@ __pycache__/
 build/
 发布/
 安装包/
+密钥导出/
 outputs/
 diagnostic-backup/
 .supabase/

@@ -97,10 +97,21 @@ Copy-Item -LiteralPath (Join-Path $ProjectRoot "给使用者的说明.txt") -Des
 
 $ExecutablePath = Join-Path $ReleaseRoot "Ozon_RFBS上品工具.exe"
 if (-not $SkipPackagedSmokeTest) {
-    & $ExecutablePath --packaging-smoke-test
-    if ($LASTEXITCODE -ne 0) {
+    # Windowed executables return control to PowerShell before initialization
+    # finishes. Wait explicitly so compression cannot race the smoke test and
+    # lock the executable or bundled libraries underneath it.
+    Start-Sleep -Seconds 2
+    $SmokeProcess = Start-Process -FilePath $ExecutablePath `
+        -ArgumentList "--packaging-smoke-test" `
+        -PassThru
+    if (-not $SmokeProcess.WaitForExit(180000)) {
+        Stop-Process -Id $SmokeProcess.Id -Force -ErrorAction SilentlyContinue
+        throw "打包后的程序自检超时。"
+    }
+    if ($SmokeProcess.ExitCode -ne 0) {
         throw "打包后的程序自检失败。"
     }
+    Start-Sleep -Milliseconds 500
 }
 
 $ArchiveCreated = $false

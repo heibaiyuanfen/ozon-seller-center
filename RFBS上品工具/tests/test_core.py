@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import io
 import queue
@@ -280,12 +281,16 @@ class CoreTests(unittest.TestCase):
         current = ReferenceProduct("https://www.ozon.ru/product/3389874670/", "Current", images=["https://cdn/new.jpg"])
         app.reference = previous
         app.vars = {"source_url": Value()}
+        app.active_job_id = "job/profile:1"
         app._log = lambda _message: None
-        with patch("app.scrape_reference", return_value=current):
+        with patch("app.scrape_reference", return_value=current) as scrape:
             app._download_reference_images = lambda _reference: (_ for _ in ()).throw(RuntimeError("download failed"))
             with self.assertRaisesRegex(RuntimeError, "download failed"):
                 app._parse_url()
         self.assertIs(app.reference, previous)
+        profile_dir = scrape.call_args.kwargs["profile_dir"]
+        self.assertEqual(profile_dir.name, hashlib.sha256(b"job/profile:1").hexdigest()[:20])
+        self.assertEqual(profile_dir.parent.name, "browser_profiles_parallel")
 
     def test_flattens_current_official_leaf_shape_and_excludes_disabled(self):
         tree = [{

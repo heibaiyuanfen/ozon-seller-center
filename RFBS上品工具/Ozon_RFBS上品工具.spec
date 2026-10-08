@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+import os
 import sys
 
 from PyInstaller.utils.hooks import collect_all
@@ -33,6 +34,19 @@ datas += [
     (str(tcl_root / "tcl8.6"), "_tcl_data"),
     (str(tcl_root / "tk8.6"), "_tk_data"),
 ]
+
+# Include a browser runtime so scraping works on a clean Windows computer.
+playwright_root = Path(
+    os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    or (Path(os.environ["LOCALAPPDATA"]) / "ms-playwright")
+)
+chromium_dirs = sorted(playwright_root.glob("chromium-*"), reverse=True)
+if not chromium_dirs:
+    raise RuntimeError(
+        "Playwright Chromium was not found. Run: playwright install chromium"
+    )
+chromium_dir = chromium_dirs[0]
+datas.append((str(chromium_dir), f"playwright-browsers/{chromium_dir.name}"))
 
 a = Analysis(
     [str(tool_dir / "main.py")],
