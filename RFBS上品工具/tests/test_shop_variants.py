@@ -1,4 +1,7 @@
 import shutil
+import threading
+import time
+from types import SimpleNamespace
 import sys
 import tempfile
 import unittest
@@ -133,6 +136,83 @@ class ShopVariantTests(unittest.TestCase):
             rejected = self._app("c")
             with self.assertRaisesRegex(RuntimeError, "任务已暂停"):
                 rejected._generate_storefront_images(Generator([self.first] * 3), references, 0, "prompt-c", "", "covers")
+
+    def test_api_error_falls_back_once_to_watermarked_original_for_both_shops(self):
+        watermark = self.root / "watermark.png"
+        Image.new("RGBA", (30, 15), (255, 0, 255, 255)).save(watermark)
+        original = self.first.read_bytes()
+        calls = []
+        def fail(*args, **kwargs):
+            calls.append(args)
+            raise RuntimeError("HTTP 503 image API unavailable")
+        service = SimpleNamespace(api_url="https://example.invalid", model="test", timeout=120, generate=fail)
+        with patch("app.SHOP_VARIANTS_PATH", self.registry_path), patch("app.OUTPUT_DIR", self.root / "output"):
+            for shop in ("a", "b"):
+                app = self._app(shop)
+                app.auto_jobs[shop]["variant"] = {"main_image": "stale"}
+                paths = app._generate_storefront_images(service, [str(self.first), str(self.second)], 0, "prompt", str(watermark), "covers")
+                self.assertEqual(len(paths), 2)
+                self.assertTrue(all(Path(path).is_file() for path in paths))
+                self.assertEqual(Path(paths[0]).name, "first_watermarked.jpg")
+                with Image.open(paths[0]) as image:
+                    self.assertEqual(image.size, (300, 400))
+                    pixel = image.getpixel((260, 370))
+                    self.assertGreater(pixel[0], pixel[1] + 40)
+                self.assertTrue(app.auto_jobs[shop]["image_fallback"]["watermark_applied"])
+                self.assertNotIn("variant", app.auto_jobs[shop])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.first.read_bytes(), original)
+
+    def test_total_image_deadline_falls_back_without_waiting_for_remote_completion(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+        calls = []
+        def slow(*args, **kwargs):
+            calls.append(args)
+            release.wait(3)
+            return [str(self.second)]
+        service = SimpleNamespace(api_url="https://example.invalid", model="test", timeout=0.02, generate=slow)
+        app = self._app("a")
+        with patch("app.SHOP_VARIANTS_PATH", self.registry_path), patch("app.OUTPUT_DIR", self.root / "output"):
+            start = time.monotonic()
+            paths = app._generate_storefront_images(service, [str(self.first)], 0, "prompt", "", "covers")
+            self.assertLess(time.monotonic() - start, 1)
+        self.assertEqual(paths, [str(self.first)])
+        self.assertEqual(len(calls), 1)
+        self.assertIn("120 秒", app.auto_jobs["a"]["image_fallback"]["reason"])
+        release.set()
+
+    def test_fallback_pipeline_continues_upload_attributes_and_submission(self):
+        app = self._app("a")
+        job = app.auto_jobs["a"]
+        job.update(id="a", stage=2)
+        events = []
+        service = SimpleNamespace(api_url="https://example.invalid", model="test", timeout=120,
+            generate=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("proxy disconnected")))
+        watermark = self.root / "watermark.png"
+        Image.new("RGBA", (20, 10), "red").save(watermark)
+        app._apply_job_context = lambda _job: None
+        app._set_auto_progress = lambda *_args: None
+        app._retry_step = lambda _label, operation, **_kwargs: operation()
+        app._ui_call = lambda callback: callback()
+        app._checkpoint_auto_job = lambda current, stage, message: current.update(stage=stage)
+        def generate():
+            app.local_images = app._generate_storefront_images(service, [str(self.first)], 0, "prompt", str(watermark), "covers")
+        app._generate_images = generate
+        app._upload_images = lambda: events.append("upload")
+        app._ai_fill_category_attributes = lambda **kwargs: events.append("attributes")
+        app._save_draft = lambda **kwargs: "draft.json"
+        def submit(**kwargs):
+            self.assertTrue(Path(app.local_images[0]).is_file())
+            self.assertIn("watermarked", app.local_images[0])
+            events.append("submit")
+            return "submitted.json"
+        app._submit = submit
+        with patch("app.SHOP_VARIANTS_PATH", self.registry_path), patch("app.OUTPUT_DIR", self.root / "output"):
+            app._run_auto_job(job)
+        self.assertEqual(events, ["upload", "attributes", "submit"])
+        self.assertEqual(job["stage"], 7)
+        self.assertIn("proxy disconnected", job["image_fallback"]["reason"])
 
     def test_local_multi_shop_pipeline_selects_generation_and_stops_before_upload_on_failure(self):
         app = self._app("a")

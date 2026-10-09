@@ -1,6 +1,7 @@
 ﻿param(
     [switch]$SkipTests,
-    [switch]$SkipPackagedSmokeTest
+    [switch]$SkipPackagedSmokeTest,
+    [string]$OutputSubdirectory = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,9 +9,18 @@ $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ToolRoot = Join-Path $ProjectRoot "RFBS上品工具"
 $BuildRoot = Join-Path $ProjectRoot "build\pyinstaller"
 $DistRoot = Join-Path $ProjectRoot "发布"
+if ($OutputSubdirectory) {
+    if ($OutputSubdirectory -notmatch '^[a-zA-Z0-9_-]+$') {
+        throw "OutputSubdirectory must be a simple directory name."
+    }
+    $DistRoot = Join-Path $DistRoot $OutputSubdirectory
+}
 $ReleaseRoot = Join-Path $DistRoot "Ozon_RFBS上品工具"
 $ArchivePath = Join-Path $DistRoot "Ozon_RFBS上品工具-Windows-x64.zip"
 $PreservedDataRoot = Join-Path $ProjectRoot "build\preserved-program-data"
+if ($OutputSubdirectory) {
+    $PreservedDataRoot = Join-Path $ProjectRoot ("build\preserved-program-data-" + $OutputSubdirectory)
+}
 $SpecPath = Join-Path $ToolRoot "Ozon_RFBS上品工具.spec"
 $RuntimeDependencies = Join-Path $ToolRoot ".runtime-deps"
 
@@ -103,6 +113,7 @@ if (-not $SkipPackagedSmokeTest) {
     Start-Sleep -Seconds 2
     $SmokeProcess = Start-Process -FilePath $ExecutablePath `
         -ArgumentList "--packaging-smoke-test" `
+        -WindowStyle Hidden `
         -PassThru
     if (-not $SmokeProcess.WaitForExit(180000)) {
         Stop-Process -Id $SmokeProcess.Id -Force -ErrorAction SilentlyContinue

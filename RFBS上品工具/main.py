@@ -54,6 +54,9 @@ def prepare_packaged_tk_runtime() -> None:
 
 prepare_packaged_tk_runtime()
 
+from tls_runtime import configure_tls_ca_bundle
+configure_tls_ca_bundle()
+
 import tkinter as tk  # noqa: E402
 
 from app import APP_DIR, RfbsListingApp, launch  # noqa: E402

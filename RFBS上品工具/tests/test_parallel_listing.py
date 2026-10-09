@@ -174,6 +174,17 @@ class ParallelListingTests(unittest.TestCase):
         local["inputs"]["listing_mode"] = "local"
         self.assertEqual(app._parallel_job_snapshot(local)["stage"], 0)
 
+    def test_stage_one_originals_are_reused_while_other_shop_generates_copywriting(self):
+        app = self.make_app()
+        first = self.enqueue(app, "a", "shop-a")
+        first.update(stage=1, state={"source_images": ["original.jpg"], "local_images": ["original.jpg"], "reference": {"title": "A"}})
+        second = self.enqueue(app, "b", "shop-b")
+        snapshot = app._parallel_job_snapshot(second)
+        self.assertEqual(snapshot["stage"], 1)
+        self.assertEqual(snapshot["state"]["source_images"], ["original.jpg"])
+        self.assertEqual(snapshot["state"]["uploaded_urls"], [])
+        self.assertIn("继续生成文案", snapshot["message"])
+
     def test_completed_prefetch_is_copied_into_each_worker_snapshot(self):
         app = self.make_app()
         future = Future()
@@ -258,6 +269,99 @@ class ParallelListingTests(unittest.TestCase):
                 app._load_auto_jobs()
             self.assertEqual(app._listing_concurrency(), 4)
             app.listing_workers_var.set.assert_called_once_with(4)
+
+    def test_restart_recovers_latest_worker_checkpoint_and_queues_unfinished(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            path = directory / "jobs.json"
+            original = {
+                "id": "resume", "status": "running", "stage": 2, "state": {},
+                "inputs": {}, "updated_at": "2026-10-09 17:00:00",
+            }
+            stopped = {"id": "stopped", "status": "cancelled", "inputs": {}}
+            completed = {"id": "done", "status": "completed", "stage": 7, "inputs": {}}
+            atomic_write_json(path, {"jobs": {"resume": original, "stopped": stopped, "done": completed}})
+            atomic_write_json(directory / "parallel-jobs/resume.result.json", {
+                "ok": None, "job": {**original, "stage": 4,
+                "state": {"uploaded_urls": ["saved-oss"]}, "task_id": 321,
+                "updated_at": "2026-10-09 16:59:00"},
+            })
+            app = self.make_app()
+            app.vars = {}
+            app.ozon_shops = {}
+            with patch("app.AUTO_JOBS_PATH", path), patch("app.APP_DIR", directory):
+                app._load_auto_jobs()
+            job = app.auto_jobs["resume"]
+            self.assertEqual(job["status"], "queued")
+            self.assertEqual(job["stage"], 4)
+            self.assertEqual(job["task_id"], 321)
+            self.assertEqual(job["state"]["uploaded_urls"], ["saved-oss"])
+            self.assertEqual(app.auto_job_queue.get_nowait(), "resume")
+            self.assertTrue(app.auto_job_queue.empty())
+            self.assertEqual(app.auto_jobs["stopped"]["status"], "cancelled")
+            self.assertEqual(app.auto_jobs["done"]["status"], "completed")
+
+    def test_restart_preserves_manual_retry_over_stale_terminal_result(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            job = {"id": "a", "status": "queued", "stage": 2, "inputs": {}, "retry_requested": True}
+            atomic_write_json(directory / "jobs.json", {"jobs": {"a": job}})
+            atomic_write_json(directory / "parallel-jobs/a.result.json", {
+                "ok": False, "job": {**job, "status": "failed", "retry_requested": False},
+            })
+            app = self.make_app()
+            app.vars = {}
+            app.ozon_shops = {}
+            with patch("app.AUTO_JOBS_PATH", directory / "jobs.json"), patch("app.APP_DIR", directory):
+                app._load_auto_jobs()
+            self.assertEqual(app.auto_jobs["a"]["status"], "queued")
+            self.assertTrue(app.auto_jobs["a"]["retry_requested"])
+            self.assertEqual(app.auto_job_queue.get_nowait(), "a")
+
+    def test_legacy_worker_keeps_checkpoint_without_automatic_duplicate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            job = {"id": "a", "status": "running", "stage": 2, "inputs": {}}
+            atomic_write_json(directory / "jobs.json", {"jobs": {"a": job}})
+            atomic_write_json(directory / "parallel-jobs/a.request.json", {"job": job})
+            app = self.make_app()
+            app.vars = {}
+            app.ozon_shops = {}
+            with patch("app.AUTO_JOBS_PATH", directory / "jobs.json"), patch("app.APP_DIR", directory):
+                app._load_auto_jobs()
+            self.assertEqual(app.auto_jobs["a"]["status"], "failed")
+            self.assertEqual(app.auto_jobs["a"]["stage"], 2)
+            self.assertTrue(app.auto_job_queue.empty())
+
+    def test_step_start_persists_message_without_advancing_checkpoint(self):
+        app = self.make_app()
+        job = self.enqueue(app, "a", "a")
+        job.update(stage=2, state={"title": "saved"})
+        app.active_job_id = "a"
+        app.auto_progress = Mock()
+        app._save_auto_jobs = Mock()
+        app._set_auto_progress(3, "正在生成主图")
+        self.assertEqual(job["stage"], 2)
+        self.assertEqual(job["state"], {"title": "saved"})
+        self.assertEqual(job["message"], "正在生成主图")
+        self.assertGreater(job["step_started_at"], 0)
+        app._save_auto_jobs.assert_called_once()
+
+    def test_restart_reattaches_live_worker_without_launching_duplicate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            app = self.make_app()
+            job = self.enqueue(app, "a", "shop-a")
+            identity = {"pid": 123, "created": 456}
+            atomic_write_json(directory / "parallel-jobs/a.process.json", identity)
+            atomic_write_json(directory / "parallel-jobs/a.result.json", {
+                "ok": True, "job": {**job, "status": "completed", "stage": 7, "task_id": 789},
+            })
+            with patch("app.APP_DIR", directory), patch("parallel_runtime.process_is_alive", return_value=True), patch("app.subprocess.Popen") as launch:
+                app._run_job_subprocess(job)
+            launch.assert_not_called()
+            self.assertEqual(job["status"], "completed")
+            self.assertEqual(job["task_id"], 789)
 
     def test_browser_fallback_uses_separate_profile_for_each_active_job(self):
         profiles = []

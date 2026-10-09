@@ -276,6 +276,46 @@ def _attach_reference_article(reference: ReferenceProduct, article: str) -> Refe
     )
 
 
+def _replace_json_with_retry(temporary: str, target: Path) -> None:
+    # Windows readers/virus scanners can briefly deny rename/delete access.
+    # Keep the complete temporary snapshot and never truncate the old file.
+    for attempt in range(20):
+        try:
+            os.replace(temporary, target)
+            return
+        except OSError as error:
+            transient = (getattr(error, "winerror", None) in {5, 32, 33}
+                         or isinstance(error, PermissionError))
+            if not transient or attempt == 19:
+                raise
+            time.sleep(min(0.2, 0.025 * (2 ** attempt)))
+
+
+def _read_json_text(path: str | Path) -> str:
+    if os.name != "nt":
+        return Path(path).read_text(encoding="utf-8-sig")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                  ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    # SHARE_DELETE allows another process to replace a snapshot while this
+    # reader finishes reading the old, complete snapshot.
+    handle = kernel.CreateFileW(str(Path(path).resolve()), 0x80000000, 0x7, None, 3, 0x80, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except Exception:
+        kernel.CloseHandle(handle)
+        raise
+    with os.fdopen(fd, "r", encoding="utf-8-sig") as reader:
+        return reader.read()
+
+
 def atomic_write_json(path: str | Path, value: Any) -> Path:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -285,7 +325,7 @@ def atomic_write_json(path: str | Path, value: Any) -> Path:
             json.dump(value, handle, ensure_ascii=False, indent=2)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, target)
+        _replace_json_with_retry(temporary, target)
     except Exception:
         try:
             os.unlink(temporary)
@@ -297,7 +337,7 @@ def atomic_write_json(path: str | Path, value: Any) -> Path:
 
 def load_json(path: str | Path, default: Any = None) -> Any:
     try:
-        return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+        return json.loads(_read_json_text(path))
     except (OSError, ValueError, TypeError):
         return {} if default is None else default
 
@@ -866,7 +906,16 @@ def scrape_reference(
     normalized_url = normalize_reference_input(url)
     requested_article = extract_reference_article(normalized_url)
     client = session or requests.Session()
-    response = client.get(normalized_url, headers={"User-Agent": USER_AGENT, "Accept-Language": "ru-RU,ru;q=0.9"}, timeout=timeout)
+    try:
+        response = client.get(normalized_url, headers={"User-Agent": USER_AGENT, "Accept-Language": "ru-RU,ru;q=0.9"}, timeout=timeout)
+    except (requests.Timeout, requests.ConnectionError) as error:
+        if not browser_fallback:
+            raise
+        if log_func:
+            log_func(f"Ozon 直连读取超时或连接失败：{error}；正在切换浏览器采集当前商品")
+        return scrape_reference_browser(
+            normalized_url, timeout=max(120, timeout), log_func=log_func, profile_dir=profile_dir,
+        )
     if response.status_code == 403 and browser_fallback:
         return scrape_reference_browser(
             normalized_url, timeout=max(120, timeout), log_func=log_func, profile_dir=profile_dir,

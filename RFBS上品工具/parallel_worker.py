@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import copy
+import threading
+import time
 import traceback
 import tkinter as tk
 from pathlib import Path
@@ -27,8 +30,28 @@ def run_parallel_job(request_path: str, result_path: str) -> int:
     app.auto_jobs = {str(job["id"]): job}
     app.auto_job_order = [str(job["id"])]
     app.active_job_id = str(job["id"])
+    progress_lock = threading.RLock()
+    app.auto_job_lock = progress_lock
+    heartbeat_stop = threading.Event()
     def save_progress():
-        atomic_write_json(result_path, {"ok": None, "job": job})
+        with progress_lock:
+            job["heartbeat_at"] = time.time()
+            atomic_write_json(result_path, {"ok": None, "job": copy.deepcopy(job)})
+    def heartbeat():
+        while not heartbeat_stop.wait(2):
+            try:
+                save_progress()
+            except (OSError, RuntimeError):
+                # A transient file lock or concurrent snapshot change must not
+                # stop the heartbeat; the next tick retries the write.
+                continue
+    original_log = getattr(app, "_log", lambda _text: None)
+    def log_progress(text):
+        original_log(text)
+        job["message"] = str(text)[-1200:]
+        job["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        save_progress()
+    app._log = log_progress
     cancel_path = Path(str(payload.get("cancel_path") or request_path + ".cancel.json"))
     original_cancel_check = app._check_auto_job_cancelled
     def check_cancel(current_job):
@@ -43,8 +66,13 @@ def run_parallel_job(request_path: str, result_path: str) -> int:
     app._save_auto_jobs = save_progress
     app._ui_call = ui_call
     app._check_auto_job_cancelled = check_cancel
+    heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+    heartbeat_thread.start()
     try:
         app._run_auto_job(job)
+        heartbeat_stop.set()
+        heartbeat_thread.join()
+
         job.update({
             "status": "completed", "stage": 7, "error": "",
             "message": "上架、RFBS 库存和 Excel 台账已完成",
@@ -52,6 +80,8 @@ def run_parallel_job(request_path: str, result_path: str) -> int:
         atomic_write_json(result_path, {"ok": True, "job": job})
         return 0
     except AutoJobCancelled as error:
+        heartbeat_stop.set()
+        heartbeat_thread.join()
         job.update({
             "status": "cancelled", "cancel_requested": False, "error": "",
             "message": str(error) or "任务已按要求停止",
@@ -59,6 +89,8 @@ def run_parallel_job(request_path: str, result_path: str) -> int:
         atomic_write_json(result_path, {"ok": True, "job": job})
         return 0
     except Exception as error:
+        heartbeat_stop.set()
+        heartbeat_thread.join()
         job["status"] = "failed"
         job["failed_stage"] = min(7, int(job.get("stage") or 0) + 1)
         job["error"] = str(error) or type(error).__name__

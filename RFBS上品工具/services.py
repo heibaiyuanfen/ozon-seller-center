@@ -1511,7 +1511,7 @@ class OssService:
 class ImageGenerationService:
     """Small independent adapter for an OpenAI-compatible Images Edits endpoint."""
 
-    def __init__(self, api_url: str, api_key: str, model: str, timeout=600, session=None):
+    def __init__(self, api_url: str, api_key: str, model: str, timeout=120, session=None):
         self.api_url = normalize_image_edits_url(api_url)
         self.api_key = api_key.strip()
         self.model = model.strip()
@@ -1576,7 +1576,7 @@ class ImageGenerationService:
             if item.get("b64_json"):
                 content = base64.b64decode(item["b64_json"])
             elif item.get("url"):
-                download = self.session.get(item["url"], headers={"User-Agent": USER_AGENT}, timeout=120)
+                download = self.session.get(item["url"], headers={"User-Agent": USER_AGENT}, timeout=min(120, self.timeout))
                 download.raise_for_status()
                 content = download.content
             else:
