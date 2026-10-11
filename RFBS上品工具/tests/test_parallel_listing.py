@@ -363,7 +363,7 @@ class ParallelListingTests(unittest.TestCase):
             self.assertEqual(job["status"], "completed")
             self.assertEqual(job["task_id"], 789)
 
-    def test_browser_fallback_uses_separate_profile_for_each_active_job(self):
+    def test_browser_fallback_reuses_verified_profile_across_jobs(self):
         profiles = []
         app = self.make_app()
         app.vars = {"source_url": SimpleNamespace(get=lambda: "123456789")}
@@ -373,7 +373,8 @@ class ParallelListingTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     app._parse_url()
                 profiles.append(scrape.call_args.kwargs["profile_dir"])
-        self.assertNotEqual(profiles[0], profiles[1])
+        self.assertEqual(profiles[0], profiles[1])
+        self.assertEqual(profiles[0].name, "browser_profile")
 
 
 if __name__ == "__main__":

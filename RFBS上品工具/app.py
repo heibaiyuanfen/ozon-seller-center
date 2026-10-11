@@ -1964,6 +1964,7 @@ class RfbsListingApp(WbUiMixin):
         if any(marker in message for marker in (
             "不能为空", "必须大于", "不能小于", "仍缺少 ozon 必填属性",
             "请先填写", "请先选择", "配置缺少", "密钥和模型",
+            "人工验证超时", "浏览器窗口已关闭", "无法启动内置",
         )):
             return False
         return True
@@ -2533,16 +2534,15 @@ class RfbsListingApp(WbUiMixin):
             future = self.prefetch_executor.submit(self._prefetch_job_source, job)
             self.prefetch_futures[group_id] = future
 
-    def _collect_shared_job_source(self, inputs, cancel_check=lambda: None):
+    def _collect_shared_job_source(self, inputs, cancel_check=lambda: None, *, browser_fallback=True):
         from shared_source import collect_shared_source
         source_url = str(inputs.get("source_url") or "")
         article = extract_reference_article(source_url) or source_url
         group_id = str(inputs.get("product_group_id") or "")
         key = group_id + "|" + article
-        job_id = str(getattr(self, "active_job_id", "") or group_id or article)
-        profile_dir = APP_DIR / "browser_profiles_parallel" / hashlib.sha256(job_id.encode()).hexdigest()[:20]
+        profile_dir = APP_DIR / "browser_profile"
         def collect():
-            reference = scrape_reference(source_url, timeout=30, browser_fallback=True,
+            reference = scrape_reference(source_url, timeout=30, browser_fallback=browser_fallback,
                 log_func=self._log, profile_dir=profile_dir)
             paths, _directory = self._download_reference_images(reference)
             return {
@@ -2561,7 +2561,7 @@ class RfbsListingApp(WbUiMixin):
         group_id = str(inputs.get("product_group_id") or job.get("id") or "prefetch")
         safe_group = re.sub(r"[^A-Za-z0-9._-]+", "_", group_id).strip("._-") or "prefetch"
         try:
-            state = self._collect_shared_job_source(inputs)
+            state = self._collect_shared_job_source(inputs, browser_fallback=False)
             with self.auto_job_lock:
                 job["prefetch_state"] = state
                 job["prefetch_status"] = "completed"

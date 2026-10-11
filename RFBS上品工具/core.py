@@ -79,24 +79,29 @@ def _pricing_decimal(value, label: str, *, allow_zero: bool = False) -> Decimal:
 
 
 def _shipping_price_bands(weight_kg: Decimal) -> list[tuple[Decimal, Decimal, Decimal]]:
-    """Return (minimum price, exclusive maximum price, shipping) bands."""
+    """Choose tariffs by actual weight; round only the variable weight charge.
+
+    For example, 410g is billed as 500g but still uses the under-500g
+    base fee. Rounding must not promote the parcel into a higher tariff
+    or reject an actual weight below the 30kg upper limit.
+    """
     billable_weight = (
         weight_kg * Decimal("10")
     ).to_integral_value(rounding=ROUND_CEILING) / Decimal("10")
     bands: list[tuple[Decimal, Decimal, Decimal]] = []
-    if billable_weight < Decimal("0.5"):
+    if weight_kg < Decimal("0.5"):
         bands.append((Decimal("0"), Decimal("135"), Decimal("3.37") + billable_weight * Decimal("28.10")))
-    elif billable_weight < Decimal("30"):
+    elif weight_kg < Decimal("30"):
         bands.append((Decimal("0"), Decimal("135"), Decimal("24.71") + billable_weight * Decimal("28.10")))
 
-    if billable_weight < Decimal("2"):
+    if weight_kg < Decimal("2"):
         bands.append((Decimal("135"), Decimal("635"), Decimal("17.97") + billable_weight * Decimal("28.10")))
-    elif billable_weight < Decimal("30"):
+    elif weight_kg < Decimal("30"):
         bands.append((Decimal("135"), Decimal("635"), Decimal("40.44") + billable_weight * Decimal("28.10")))
 
-    if billable_weight < Decimal("5"):
+    if weight_kg < Decimal("5"):
         bands.append((Decimal("635"), Decimal("22525"), Decimal("25.83") + billable_weight * Decimal("19.10")))
-    elif billable_weight < Decimal("30"):
+    elif weight_kg < Decimal("30"):
         bands.append((Decimal("635"), Decimal("22525"), Decimal("64.00") + billable_weight * Decimal("25.80")))
     return bands
 
@@ -604,10 +609,19 @@ def parse_reference_html(url: str, page: str) -> ReferenceProduct:
 def scrape_reference_browser(
     url: str, *, timeout=180, log_func=None, profile_dir: str | Path | None = None,
 ) -> ReferenceProduct:
+    from browser_runtime import browser_profile_lock
+    profile = Path(profile_dir) if profile_dir else APP_DATA_DIR / "browser_profile"
+    with browser_profile_lock(profile):
+        return _scrape_reference_browser_locked(url, timeout=timeout, log_func=log_func, profile_dir=profile)
+
+
+def _scrape_reference_browser_locked(
+    url: str, *, timeout=180, log_func=None, profile_dir: str | Path | None = None,
+) -> ReferenceProduct:
     """Load a blocked storefront page in a visible, dedicated browser profile."""
     try:
         from playwright.sync_api import sync_playwright
-        from browser_runtime import chromium_launch_candidates
+        from browser_runtime import chromium_launch_candidates, evaluate_after_navigation
     except ImportError as error:
         raise RuntimeError("Ozon 拒绝了直接解析；请先安装浏览器解析组件：pip install playwright") from error
 
@@ -649,7 +663,7 @@ def scrape_reference_browser(
             while time.monotonic() < deadline:
                 if browser_page.is_closed():
                     raise RuntimeError("浏览器窗口已关闭，未完成 Ozon 链接解析")
-                data = browser_page.evaluate(r"""
+                data = evaluate_after_navigation(browser_page, r"""
                     () => {
                       let product = {};
                       for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
@@ -820,7 +834,7 @@ def scrape_reference_browser(
                         pageTitle: document.title || ''
                       };
                     }
-                """)
+                """, deadline)
                 title = str(data.get("title") or "").strip()
                 page_title = str(data.get("pageTitle") or "").casefold()
                 challenge = any(text in page_title for text in ("похоже", "доступ ограничен", "captcha", "нет соединения"))
@@ -929,19 +943,19 @@ def scrape_reference(
                 f"Ozon 跳转到了另一个变体 Артикул {actual_article}，目标是 {requested_article}；已停止解析"
             )
         reference = parse_reference_html(normalized_url, response.text)
-        if browser_fallback and not reference.images:
-            if log_func:
-                log_func("Ozon 直连响应已读取到标题，但图库为空；切换到浏览器重新加载商品图库")
-            return scrape_reference_browser(
-                normalized_url, timeout=max(120, timeout), log_func=log_func, profile_dir=profile_dir,
-            )
-        return _attach_reference_article(reference, requested_article)
     except RuntimeError:
         if browser_fallback:
             return scrape_reference_browser(
                 normalized_url, timeout=max(120, timeout), log_func=log_func, profile_dir=profile_dir,
             )
         raise
+    if browser_fallback and not reference.images:
+        if log_func:
+            log_func("Ozon 直连响应已读取到标题，但图库为空；切换到浏览器重新加载商品图库")
+        return scrape_reference_browser(
+            normalized_url, timeout=max(120, timeout), log_func=log_func, profile_dir=profile_dir,
+        )
+    return _attach_reference_article(reference, requested_article)
 
 
 def flatten_categories(tree: list[dict[str, Any]]) -> list[dict[str, Any]]:

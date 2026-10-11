@@ -3,6 +3,51 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from contextlib import contextmanager
+import time
+
+
+@contextmanager
+def browser_profile_lock(profile: Path):
+    """Serialize browser access across threads and listing subprocesses."""
+    profile.mkdir(parents=True, exist_ok=True)
+    with (profile / "collector.lock").open("a+b") as handle:
+        if handle.seek(0, 2) == 0:
+            handle.write(b"0")
+            handle.flush()
+        while True:
+            handle.seek(0)
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                time.sleep(0.2)
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def evaluate_after_navigation(page, script, deadline):
+    """Keep the same verification window when navigation interrupts DOM reads."""
+    while True:
+        try:
+            return page.evaluate(script)
+        except Exception as error:
+            if not any(marker in str(error).lower() for marker in (
+                "execution context was destroyed", "cannot find context with specified id",
+            )) or page.is_closed() or time.monotonic() >= deadline:
+                raise
+            page.wait_for_timeout(500)
 
 
 def bundled_chromium_executable() -> Path | None:

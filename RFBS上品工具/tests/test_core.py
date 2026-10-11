@@ -42,9 +42,60 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(calculate_shipping("100", "0.01"), Decimal("6.180"))
         self.assertEqual(calculate_shipping("100", "0.10"), Decimal("6.180"))
         self.assertEqual(calculate_shipping("100", "0.11"), Decimal("8.990"))
-        self.assertEqual(calculate_shipping("100", "0.41"), Decimal("38.760"))
-        self.assertEqual(calculate_shipping("200", "1.91"), Decimal("96.640"))
-        self.assertEqual(calculate_shipping("700", "4.91"), Decimal("193.000"))
+        self.assertEqual(calculate_shipping("100", "0.41"), Decimal("17.420"))
+        self.assertEqual(calculate_shipping("200", "1.91"), Decimal("74.170"))
+        self.assertEqual(calculate_shipping("700", "4.91"), Decimal("121.330"))
+
+    def test_shipping_tariffs_use_actual_weight_at_every_boundary(self):
+        cases = (
+            ("100", "0.31", "14.610"),
+            ("100", "0.4", "14.610"),
+            ("100", "0.401", "17.420"),
+            ("100", "0.499", "17.420"),
+            ("100", "0.5", "38.760"),
+            ("100", "0.501", "41.570"),
+            ("200", "1.9", "71.360"),
+            ("200", "1.901", "74.170"),
+            ("200", "1.999", "74.170"),
+            ("200", "2", "96.640"),
+            ("200", "2.001", "99.450"),
+            ("700", "4.9", "119.420"),
+            ("700", "4.901", "121.330"),
+            ("700", "4.999", "121.330"),
+            ("700", "5", "193.000"),
+            ("700", "5.001", "195.580"),
+            ("100", "29.999", "867.710"),
+            ("200", "29.999", "883.440"),
+            ("700", "29.999", "838.000"),
+        )
+        for price, weight, expected in cases:
+            with self.subTest(price=price, weight=weight):
+                self.assertEqual(calculate_shipping(price, weight), Decimal(expected))
+        for price in ("100", "200", "700"):
+            with self.subTest(price=price):
+                with self.assertRaisesRegex(ValueError, "超出运费公式"):
+                    calculate_shipping(price, "30")
+
+    def test_screenshot_roi_pricing_does_not_promote_410g_base_fee(self):
+        results = {}
+        for grams in (310, 400, 401, 410, 499, 500):
+            results[grams] = calculate_roi_price(
+                "19", "3", "30", Decimal(grams) / 1000,
+                sales_commission_percent="12", advertising_percent="0", cargo_loss_percent="3",
+            )
+        self.assertEqual(results[310].shipping, results[400].shipping)
+        self.assertEqual(results[410].shipping - results[400].shipping, Decimal("2.810"))
+        self.assertEqual(results[410].shipping, Decimal("17.420"))
+        self.assertEqual(results[410].price, Decimal("55"))
+        self.assertEqual(results[500].shipping, Decimal("38.760"))
+        for grams, result in results.items():
+            with self.subTest(grams=grams):
+                previous = calculate_price_breakdown(
+                    result.price - 1, "19", "3", Decimal(grams) / 1000, "12",
+                    advertising_percent="0", cargo_loss_percent="3",
+                )
+                self.assertGreaterEqual(result.roi_percent, Decimal("30"))
+                self.assertLess(previous.roi_percent, Decimal("30"))
 
     def test_roi_price_is_minimum_whole_price_that_reaches_target(self):
         breakdown = calculate_roi_price(
@@ -289,8 +340,7 @@ class CoreTests(unittest.TestCase):
                 app._parse_url()
         self.assertIs(app.reference, previous)
         profile_dir = scrape.call_args.kwargs["profile_dir"]
-        self.assertEqual(profile_dir.name, hashlib.sha256(b"job/profile:1").hexdigest()[:20])
-        self.assertEqual(profile_dir.parent.name, "browser_profiles_parallel")
+        self.assertEqual(profile_dir.name, "browser_profile")
 
     def test_flattens_current_official_leaf_shape_and_excludes_disabled(self):
         tree = [{
