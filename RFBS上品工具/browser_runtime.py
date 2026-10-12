@@ -87,10 +87,11 @@ def bundled_chromium_executable() -> Path | None:
 
 
 def chromium_launch_candidates() -> list[dict[str, str]]:
-    """Prefer the packaged browser, retaining system browsers as fallbacks."""
-    candidates: list[dict[str, str]] = []
-    bundled = bundled_chromium_executable()
-    if bundled is not None:
-        candidates.append({"executable_path": str(bundled)})
-    candidates.extend(({"channel": "msedge"}, {"channel": "chrome"}))
-    return candidates
+    """Use the installed Google Chrome for storefront collection."""
+    return [{"channel": "chrome"}]
+
+
+def bundled_edge_executable() -> Path | None:
+    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    executable = root / "edge-runtime" / "msedge.exe"
+    return executable if executable.is_file() else None

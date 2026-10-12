@@ -6,6 +6,7 @@ import json
 import os
 import re
 import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
@@ -281,12 +282,16 @@ def _attach_reference_article(reference: ReferenceProduct, article: str) -> Refe
     )
 
 
+_JSON_SNAPSHOT_LOCK = threading.RLock()
+
+
 def _replace_json_with_retry(temporary: str, target: Path) -> None:
     # Windows readers/virus scanners can briefly deny rename/delete access.
     # Keep the complete temporary snapshot and never truncate the old file.
     for attempt in range(20):
         try:
-            os.replace(temporary, target)
+            with _JSON_SNAPSHOT_LOCK:
+                os.replace(temporary, target)
             return
         except OSError as error:
             transient = (getattr(error, "winerror", None) in {5, 32, 33}
@@ -342,7 +347,8 @@ def atomic_write_json(path: str | Path, value: Any) -> Path:
 
 def load_json(path: str | Path, default: Any = None) -> Any:
     try:
-        return json.loads(_read_json_text(path))
+        with _JSON_SNAPSHOT_LOCK:
+            return json.loads(_read_json_text(path))
     except (OSError, ValueError, TypeError):
         return {} if default is None else default
 
@@ -644,11 +650,11 @@ def _scrape_reference_browser_locked(
             except Exception as error:
                 last_error = error
         if context is None:
-            raise RuntimeError(f"无法启动内置 Chromium/Edge/Chrome 浏览器：{last_error}")
+            raise RuntimeError(f"无法启动 Google Chrome；请确认本机已安装谷歌浏览器：{last_error}")
         try:
             browser_page = context.pages[0] if context.pages else context.new_page()
             try:
-                browser_page.goto(url, wait_until="domcontentloaded", timeout=min(timeout * 1000, 120000))
+                browser_page.goto(url, wait_until="domcontentloaded", timeout=min(timeout * 1000, 20000))
             except Exception:
                 # A verification page may keep loading; continue polling the DOM.
                 pass
@@ -660,6 +666,9 @@ def _scrape_reference_browser_locked(
             best_images: list[str] = []
             best_gallery_mode = ""
             best_gallery_slot_count = 0
+            last_gallery_diagnostic = 0.0
+            title = ""
+            challenge = False
             while time.monotonic() < deadline:
                 if browser_page.is_closed():
                     raise RuntimeError("浏览器窗口已关闭，未完成 Ozon 链接解析")
@@ -687,7 +696,7 @@ def _scrape_reference_browser_locked(
                       const addImage = (raw) => {
                         let value = String(raw || '').trim();
                         if (value.startsWith('//')) value = `https:${value}`;
-                        if (!/^https:\/\//.test(value) || !/ozone\.ru/i.test(value)) return;
+                        if (!/^https:\/\//.test(value)) return;
                         if (/abt-challenge|captcha|\/icons?\//i.test(value)) return;
                         try {
                           const parsed = new URL(value);
@@ -701,7 +710,10 @@ def _scrape_reference_browser_locked(
                       const imageSource = (image) => {
                         const candidates = String(image.getAttribute('srcset') || '').split(',')
                           .map(x => x.trim().split(/\s+/)[0]).filter(Boolean);
-                        return candidates.at(-1) || image.currentSrc || image.src || image.getAttribute('data-src') || '';
+                        const sources = [candidates.at(-1), image.currentSrc,
+                          image.getAttribute('data-src'), image.getAttribute('data-original'), image.src];
+                        return sources.find(value => value && /\/s3\/multimedia/i.test(value)) ||
+                          sources.find(value => value && !/^(data:|blob:)/i.test(value)) || '';
                       };
                       const gallerySelectors = [
                         '[data-widget="webGallery"] img', '[data-widget*="Gallery"] img',
@@ -710,6 +722,39 @@ def _scrape_reference_browser_locked(
                       const galleryElements = new Set();
                       for (const selector of gallerySelectors) {
                         for (const image of document.querySelectorAll(selector)) galleryElements.add(image);
+                      }
+                      // Some storefront layouts omit the gallery widget marker.
+                      // Restrict the fallback to the visible product area beside h1.
+                      if (heading) {
+                        const headingRect = document.querySelector('h1').getBoundingClientRect();
+                        const candidates = [...document.images].filter(image => {
+                          const rect = image.getBoundingClientRect();
+                          return /(?:multimedia|\.(?:jpe?g|png|webp|avif)(?:[?#]|$))/i.test(imageSource(image)) &&
+                            rect.width >= 30 && rect.height >= 30 &&
+                            rect.x + rect.width <= headingRect.x + 24 &&
+                            rect.y >= headingRect.y - 100 &&
+                            rect.y < headingRect.y + 750;
+                        });
+                        const preview = candidates.filter(image => {
+                          const rect = image.getBoundingClientRect();
+                          return rect.width >= 200 && rect.height >= 200;
+                        }).sort((a, b) => {
+                          const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+                          return rb.width * rb.height - ra.width * ra.height;
+                        })[0];
+                        if (preview) {
+                          const main = preview.getBoundingClientRect();
+                          // Prefer the product preview and rail over obsolete
+                          // widget markers that may now contain unrelated images.
+                          galleryElements.clear();
+                          galleryElements.add(preview);
+                          for (const image of candidates) {
+                            const rect = image.getBoundingClientRect();
+                            if (Math.max(rect.width, rect.height) <= 180 &&
+                                rect.x + rect.width <= main.x + 24)
+                              galleryElements.add(image);
+                          }
+                        }
                       }
                       const galleryRecords = [...galleryElements].map((image, order) => {
                         const rect = image.getBoundingClientRect();
@@ -743,13 +788,14 @@ def _scrape_reference_browser_locked(
                       for (const item of positionedGallery) addImage(item.source);
                       if (!images.length) {
                         const rawImages = product.image || [];
-                        for (const value of (Array.isArray(rawImages) ? rawImages : [rawImages])) addImage(value);
+                        for (const value of (Array.isArray(rawImages) ? rawImages : [rawImages]))
+                          addImage(typeof value === 'object' ? value?.url || value?.contentUrl : value);
                         addImage(meta('og:image'));
                       }
                       if (images.length < 2) {
                         for (const image of document.querySelectorAll('img[src],img[srcset],img[data-src]')) {
                           const alt = String(image.alt || '').trim();
-                          if (alt && (alt === heading || heading.includes(alt) || alt.includes(heading))) addImage(imageSource(image));
+                          if (heading && alt && (alt === heading || heading.includes(alt) || alt.includes(heading))) addImage(imageSource(image));
                         }
                       }
                       const uniqueImages = [];
@@ -823,7 +869,7 @@ def _scrape_reference_browser_locked(
                         }
                       }
                       return {
-                        title: String(product.name || meta('og:title') || heading || '').trim(),
+                        title: String(heading || product.name || meta('og:title') || '').trim(),
                         description: description || cleanText(meta('og:description') || ''),
                         images: uniqueImages.slice(0, 20),
                         properties,
@@ -846,6 +892,9 @@ def _scrape_reference_browser_locked(
                         best_gallery_slot_count = int(data.get("gallerySlotCount") or len(current_images))
                     if not content_hydration_started:
                         if not best_images:
+                            if log_func and time.monotonic() - last_gallery_diagnostic >= 15:
+                                log_func("商品标题已识别，但尚未识别到图库；正在等待商品主图和缩略图加载")
+                                last_gallery_diagnostic = time.monotonic()
                             # Keep the gallery viewport visible until at least
                             # one real product image has hydrated.
                             browser_page.evaluate("() => window.scrollTo(0, 0)")
@@ -903,7 +952,13 @@ def _scrape_reference_browser_locked(
                         reference = ReferenceProduct(url, title, str(data.get("description") or "").strip(), images, properties, tags)
                         return _attach_reference_article(reference, requested_article)
                 browser_page.wait_for_timeout(1000)
-            raise RuntimeError("等待 Ozon 页面或人工验证超时；请确认浏览器中能正常打开该商品")
+            raise RuntimeError(
+                "Ozon 页面采集超时：" + (
+                    "商品页已打开，但未识别到可下载的商品图库"
+                    if title and not challenge and not best_images else
+                    "商品页或人工验证未在等待时间内完成"
+                )
+            )
         finally:
             try:
                 context.close()

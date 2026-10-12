@@ -25,8 +25,7 @@ class BrowserRuntimeTests(unittest.TestCase):
             ):
                 self.assertEqual(bundled_chromium_executable(), executable.resolve())
                 candidates = chromium_launch_candidates()
-            self.assertEqual(candidates[0], {"executable_path": str(executable.resolve())})
-            self.assertEqual(candidates[-2:], [{"channel": "msedge"}, {"channel": "chrome"}])
+            self.assertEqual(candidates, [{"channel": "chrome"}])
 
 
 if __name__ == "__main__":

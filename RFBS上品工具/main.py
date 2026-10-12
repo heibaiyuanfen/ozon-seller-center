@@ -67,7 +67,7 @@ def packaging_smoke_test() -> int:
     import alibabacloud_oss_v2  # noqa: F401
     import openpyxl
     from playwright.sync_api import sync_playwright
-    from browser_runtime import bundled_chromium_executable
+    from browser_runtime import bundled_edge_executable
     from product_ledger import SHEET_TITLE, upsert_product_ledger
 
     APP_DIR.mkdir(parents=True, exist_ok=True)
@@ -83,9 +83,9 @@ def packaging_smoke_test() -> int:
         workbook.close()
     finally:
         ledger_probe.unlink(missing_ok=True)
-    browser_executable = bundled_chromium_executable()
+    browser_executable = bundled_edge_executable()
     if getattr(sys, "frozen", False) and browser_executable is None:
-        raise RuntimeError("安装包中缺少内置 Chromium 浏览器")
+        raise RuntimeError("安装包中缺少 Edge 浏览器运行文件")
     if browser_executable is not None:
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(

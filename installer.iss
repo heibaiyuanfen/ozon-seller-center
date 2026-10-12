@@ -1,5 +1,5 @@
 #define MyAppName "Ozon RFBS 上品工具"
-#define MyAppVersion "2026.09.18.1"
+#define MyAppVersion "2026.10.12"
 #define MyAppPublisher "heibaiyuanfen"
 #define MyAppExeName "Ozon_RFBS上品工具.exe"
 
@@ -15,7 +15,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=安装包
-OutputBaseFilename=Ozon_RFBS上品工具_20260918_采集修复完整安装版
+OutputBaseFilename=Ozon_RFBS上品工具_20261012_Edge完整安装版
 Compression=lzma2/max
 SolidCompression=yes
 LZMANumBlockThreads=4
@@ -31,13 +31,17 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 [Files]
 Source: "发布\Ozon_RFBS上品工具\*"; DestDir: "{app}"; Excludes: "程序数据\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "RFBS上品工具\config.json"; DestDir: "{app}\程序数据"; Flags: onlyifdoesntexist uninsneveruninstall
+#ifdef IncludeHistory
 Source: "RFBS上品工具\auto_jobs.json"; DestDir: "{app}\程序数据"; Flags: onlyifdoesntexist uninsneveruninstall
 Source: "RFBS上品工具\workspace_state.json"; DestDir: "{app}\程序数据"; Flags: onlyifdoesntexist uninsneveruninstall
+#endif
 Source: "RFBS上品工具\*.ozon-api.json"; DestDir: "{app}\程序数据"; Flags: onlyifdoesntexist uninsneveruninstall
 Source: "RFBS上品工具\*.xlsx"; DestDir: "{app}\程序数据"; Excludes: "~$*"; Flags: onlyifdoesntexist uninsneveruninstall
 Source: "RFBS上品工具\*.db"; DestDir: "{app}\程序数据"; Flags: onlyifdoesntexist uninsneveruninstall
 Source: "RFBS上品工具\cache\*"; DestDir: "{app}\程序数据\cache"; Flags: onlyifdoesntexist uninsneveruninstall recursesubdirs createallsubdirs
+#ifdef IncludeHistory
 Source: "RFBS上品工具\输出\*"; DestDir: "{app}\程序数据\输出"; Flags: onlyifdoesntexist uninsneveruninstall recursesubdirs createallsubdirs
+#endif
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

@@ -160,7 +160,7 @@ def scrape_amazon_product(
             except Exception as error:
                 last_error = error
         if context is None:
-            raise RuntimeError(f"无法启动内置 Chromium/Edge/Chrome 解析亚马逊：{last_error}")
+            raise RuntimeError(f"无法启动 Google Chrome 解析亚马逊；请确认本机已安装谷歌浏览器：{last_error}")
         try:
             page = context.pages[0] if context.pages else context.new_page()
             try:

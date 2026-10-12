@@ -3,6 +3,7 @@
 from pathlib import Path
 import os
 import sys
+import subprocess
 
 from PyInstaller.utils.hooks import collect_all
 
@@ -40,13 +41,24 @@ playwright_root = Path(
     os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
     or (Path(os.environ["LOCALAPPDATA"]) / "ms-playwright")
 )
-chromium_dirs = sorted(playwright_root.glob("chromium-*"), reverse=True)
-if not chromium_dirs:
-    raise RuntimeError(
-        "Playwright Chromium was not found. Run: playwright install chromium"
-    )
-chromium_dir = chromium_dirs[0]
-datas.append((str(chromium_dir), f"playwright-browsers/{chromium_dir.name}"))
+edge_root = Path(os.environ.get("ProgramFiles(x86)", "C:/Program Files (x86)")) / "Microsoft/Edge/Application"
+edge_versions = sorted(
+    (path for path in edge_root.iterdir() if path.is_dir() and path.name[0].isdigit()),
+    key=lambda path: tuple(int(part) for part in path.name.split(".")),
+)
+if not edge_versions or not (edge_root / "msedge.exe").is_file():
+    raise RuntimeError("Microsoft Edge runtime missing from build computer")
+edge_executable = edge_root / "msedge.exe"
+edge_version_name = subprocess.check_output(
+    ["powershell.exe", "-NoProfile", "-Command",
+     f"(Get-Item -LiteralPath '{edge_executable}').VersionInfo.ProductVersion"],
+    text=True,
+).strip()
+edge_version = edge_root / edge_version_name
+if not edge_version.is_dir():
+    raise RuntimeError(f"Matching Edge runtime version missing: {edge_version_name}")
+datas.append((str(edge_root / "msedge.exe"), "edge-runtime"))
+datas.append((str(edge_version), f"edge-runtime/{edge_version.name}"))
 
 a = Analysis(
     [str(tool_dir / "main.py")],

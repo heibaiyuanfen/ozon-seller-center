@@ -400,6 +400,8 @@ class ImageDownloadService:
                 break
             try:
                 high_resolution_url = prefer_high_resolution_image_url(str(url))
+                if log_func:
+                    log_func(f"正在下载第 {index} 张商品原图……")
                 response = self.session.get(high_resolution_url, headers={
                     "User-Agent": USER_AGENT,
                     "Referer": "https://www.ozon.ru/",
@@ -435,6 +437,8 @@ class ImageDownloadService:
                         log_func(f"已下载原图 {len(results)}：{rgb.width}x{rgb.height}")
             except Exception as error:
                 failures.append(f"第 {index} 张：{error}")
+                if log_func:
+                    log_func(f"第 {index} 张商品图下载失败：{error}")
         if not results:
             detail = "；".join(failures[:3])
             raise RuntimeError("原图全部下载失败" + ("：" + detail if detail else ""))
