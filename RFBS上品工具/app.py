@@ -939,6 +939,11 @@ class RfbsListingApp(WbUiMixin):
         self._entry(tab, "接口地址", "image_api_url", 7, width=50)
         self._entry(tab, "API Key", "image_api_key", 7, 2, show="*")
         self._entry(tab, "模型", "image_model", 8, default="gpt-image-1")
+        image_modes = ttk.Frame(tab)
+        image_modes.grid(row=8, column=2, columnspan=2, sticky="w")
+        ttk.Radiobutton(image_modes, text="API 生图", variable=self._var("image_mode", "api"), value="api").pack(side=tk.LEFT)
+        ttk.Radiobutton(image_modes, text="Codex 桌面任务", variable=self._var("image_mode", "api"), value="codex_desktop").pack(side=tk.LEFT)
+        ttk.Button(image_modes, text="复制 Codex 任务", command=self._copy_codex_image_tasks).pack(side=tk.LEFT, padx=4)
         ttk.Separator(tab).grid(row=9, column=0, columnspan=4, sticky="ew", pady=10)
         ttk.Label(tab, text="产品视觉分析 AI（OpenAI-compatible Chat Completions，须支持图片）", font=("Microsoft YaHei UI", 12, "bold")).grid(row=10, column=0, columnspan=4, sticky="w")
         self._entry(tab, "接口地址", "analysis_api_url", 11, width=50)
@@ -1151,7 +1156,7 @@ class RfbsListingApp(WbUiMixin):
                 "selected_shop_id": selected_shop_id,
                 "shops": [dict(shop) for shop in self.ozon_shops.values()],
             },
-            "image": {"api_url": self.vars["image_api_url"].get().strip(), "api_key": self.vars["image_api_key"].get().strip(), "model": self.vars["image_model"].get().strip()},
+            "image": {"api_url": self.vars["image_api_url"].get().strip(), "api_key": self.vars["image_api_key"].get().strip(), "model": self.vars["image_model"].get().strip(), "mode": self._var("image_mode", "api").get()},
             "analysis": {"api_url": self.vars["analysis_api_url"].get().strip(), "api_key": self.vars["analysis_api_key"].get().strip(), "model": self.vars["analysis_model"].get().strip()},
             "text": {"api_url": self.vars["text_api_url"].get().strip(), "api_key": self.vars["text_api_key"].get().strip(), "model": self.vars["text_model"].get().strip()},
             "oss": {
@@ -1628,6 +1633,7 @@ class RfbsListingApp(WbUiMixin):
     def _load_config(self):
         cfg = load_json(CONFIG_PATH, {})
         mapping = {
+            "image_mode": ("image", "mode"),
             "image_api_url": ("image", "api_url"), "image_api_key": ("image", "api_key"), "image_model": ("image", "model"),
             "analysis_api_url": ("analysis", "api_url"), "analysis_api_key": ("analysis", "api_key"), "analysis_model": ("analysis", "model"),
             "text_api_url": ("text", "api_url"), "text_api_key": ("text", "api_key"), "text_model": ("text", "model"),
@@ -4549,15 +4555,23 @@ class RfbsListingApp(WbUiMixin):
                 f" Retry {attempt}: create a clearly different composition, background and lighting "
                 "from earlier storefront covers. Preserve the exact product, color, shape and contents."
             )
-            self._log(f"正在请求生图接口（主图差异尝试 {attempt + 1}/3）；最多等待 120 秒，异常后使用原主图加水印")
+            if getattr(service, "desktop_handoff", False):
+                self._log(f"正在提交 Codex 桌面生图任务（主图差异尝试 {attempt + 1}/3）")
+            else:
+                self._log(f"正在请求生图接口（主图差异尝试 {attempt + 1}/3）；最多等待 120 秒，异常后使用原主图加水印")
             try:
-                generated = self._generate_main_with_deadline(
-                    service, primary, retry_prompt, attempt_dir / "generated",
-                    generation_deadline - time.monotonic(),
-                )
+                if getattr(service, "desktop_handoff", False):
+                    generated = service.generate([primary], retry_prompt, 1, attempt_dir / "generated", exact_3_4=True)
+                else:
+                    generated = self._generate_main_with_deadline(
+                        service, primary, retry_prompt, attempt_dir / "generated",
+                        generation_deadline - time.monotonic(),
+                    )
             except AutoJobCancelled:
                 raise
             except Exception as error:
+                if getattr(service, "desktop_handoff", False):
+                    raise
                 return self._fallback_to_source_images(references, primary_index, watermark, output_dir, error)
             paths = [generated[0], *attachments]
             if watermark:
@@ -4584,6 +4598,35 @@ class RfbsListingApp(WbUiMixin):
             }
             self._save_auto_jobs()
 
+    def _copy_codex_image_tasks(self):
+        task_root = APP_DIR / "codex-image-tasks"
+        task_root.mkdir(parents=True, exist_ok=True)
+        prompt = (
+            f"请处理 {task_root.resolve()} 中所有未完成的生图任务。"
+            "逐个阅读 Codex任务.txt，使用图片生成工具生成图片，按指定路径保存 result.png，"
+            "再写入含对应 task_id 的 result.json。不得混用任务参考图；每个店铺生成不同主图。"
+            "软件收到结果后会自动继续上传，无需你操作上架。"
+        )
+        self.root.clipboard_clear()
+        self.root.clipboard_append(prompt)
+        messagebox.showinfo("Codex 任务指令已复制", "请在同一台电脑的 Codex 桌面端发送已复制的指令。")
+
+    def _image_generation_service(self, cfg):
+        if cfg.get("mode") == "codex_desktop":
+            from codex_images import CodexDesktopImages
+            job = self.auto_jobs.get(str(getattr(self, "active_job_id", "") or ""))
+            inputs = self._active_job_inputs()
+            metadata = {key: str(inputs.get(key) or "") for key in ("offer_id", "ozon_shop_id", "ozon_shop_name")}
+            def report(message):
+                self._log(message)
+                if job:
+                    job["message"] = message
+                    self._save_auto_jobs()
+                    self._refresh_job_tree()
+            return CodexDesktopImages(APP_DIR / "codex-image-tasks", metadata,
+                report, lambda: self._check_auto_job_cancelled(job) if job else None)
+        return ImageGenerationService(cfg["api_url"], cfg["api_key"], cfg["model"])
+
     def _generate_images(self):
         references = self.source_images or self.local_images
         if not references:
@@ -4592,8 +4635,8 @@ class RfbsListingApp(WbUiMixin):
         if not Path(watermark).is_file():
             raise FileNotFoundError("请先选择有效的水印文件")
         cfg = self._config()["image"]
-        service = ImageGenerationService(cfg["api_url"], cfg["api_key"], cfg["model"])
-        if service.api_url != cfg["api_url"].rstrip("/"):
+        service = self._image_generation_service(cfg)
+        if not getattr(service, "desktop_handoff", False) and service.api_url != cfg["api_url"].rstrip("/"):
             self.root.after(0, lambda: self.vars["image_api_url"].set(service.api_url))
             self._log("生图接口地址已自动补全为：" + service.api_url)
         primary_index = self.primary_reference_index if self.primary_reference_index < len(references) else 0
@@ -4663,8 +4706,8 @@ class RfbsListingApp(WbUiMixin):
         if not references:
             raise ValueError("请先为新品选择至少 1 张商品图片")
         cfg = self._config()["image"]
-        service = ImageGenerationService(cfg["api_url"], cfg["api_key"], cfg["model"])
-        if service.api_url != cfg["api_url"].rstrip("/"):
+        service = self._image_generation_service(cfg)
+        if not getattr(service, "desktop_handoff", False) and service.api_url != cfg["api_url"].rstrip("/"):
             self.root.after(0, lambda: self.vars["image_api_url"].set(service.api_url))
         primary_index = self.primary_reference_index if self.primary_reference_index < len(references) else 0
         analysis = self._ensure_vision_analysis()
