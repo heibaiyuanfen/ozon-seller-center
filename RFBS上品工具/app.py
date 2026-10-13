@@ -943,6 +943,7 @@ class RfbsListingApp(WbUiMixin):
         image_modes.grid(row=8, column=2, columnspan=2, sticky="w")
         ttk.Radiobutton(image_modes, text="API 生图", variable=self._var("image_mode", "api"), value="api").pack(side=tk.LEFT)
         ttk.Radiobutton(image_modes, text="Codex 桌面任务", variable=self._var("image_mode", "api"), value="codex_desktop").pack(side=tk.LEFT)
+        ttk.Radiobutton(image_modes, text="原图直接上架", variable=self._var("image_mode", "api"), value="original").pack(side=tk.LEFT)
         ttk.Button(image_modes, text="复制 Codex 任务", command=self._copy_codex_image_tasks).pack(side=tk.LEFT, padx=4)
         ttk.Separator(tab).grid(row=9, column=0, columnspan=4, sticky="ew", pady=10)
         ttk.Label(tab, text="产品视觉分析 AI（OpenAI-compatible Chat Completions，须支持图片）", font=("Microsoft YaHei UI", 12, "bold")).grid(row=10, column=0, columnspan=4, sticky="w")
@@ -2220,11 +2221,11 @@ class RfbsListingApp(WbUiMixin):
         if stock < 0:
             raise ValueError("可售库存不能小于 0")
         watermark_path = str(values.get("watermark_path") or "").strip()
-        if not local_mode and not Path(watermark_path).is_file():
+        if not self._original_images_mode() and not local_mode and not Path(watermark_path).is_file():
             raise ValueError("请先在“商品与图片”页面选择有效的水印文件")
-        if local_mode and watermark_path and not Path(watermark_path).is_file():
+        if not self._original_images_mode() and local_mode and watermark_path and not Path(watermark_path).is_file():
             raise ValueError("已填写的水印文件不存在；请重新选择或留空")
-        if local_mode and str(values.get("unique_main_image") or "0") == "1":
+        if not self._original_images_mode() and local_mode and str(values.get("unique_main_image") or "0") == "1":
             image_config = self._config()["image"]
             if not all(str(image_config.get(key) or "").strip() for key in ("api_url", "api_key", "model")):
                 raise ValueError("多店铺新品会为每店生成独立主图，请先填写生图 API 地址、密钥和模型")
@@ -4177,9 +4178,9 @@ class RfbsListingApp(WbUiMixin):
         if stock < 0:
             raise ValueError("可售库存不能小于 0")
         watermark = self.vars["watermark_path"].get().strip()
-        if not local_mode and not Path(watermark).is_file():
+        if not self._original_images_mode() and not local_mode and not Path(watermark).is_file():
             raise ValueError("请先在“商品与图片”页面选择有效的水印文件")
-        if local_mode and watermark and not Path(watermark).is_file():
+        if not self._original_images_mode() and local_mode and watermark and not Path(watermark).is_file():
             raise ValueError("已填写的水印文件不存在；请重新选择或留空")
         return category
 
@@ -4627,7 +4628,31 @@ class RfbsListingApp(WbUiMixin):
                 report, lambda: self._check_auto_job_cancelled(job) if job else None)
         return ImageGenerationService(cfg["api_url"], cfg["api_key"], cfg["model"])
 
+    def _original_images_mode(self):
+        variable = getattr(self, "vars", {}).get("image_mode")
+        return variable is not None and variable.get() == "original"
+
+    def _use_original_images(self):
+        references = list(self.source_images or self.local_images)
+        if not references:
+            raise ValueError("请先采集或选择商品图片")
+        index = self.primary_reference_index if 0 <= self.primary_reference_index < len(references) else 0
+        paths = [references[index], *[path for i, path in enumerate(references) if i != index]][:15]
+        for path in paths:
+            if not Path(path).is_file():
+                raise FileNotFoundError(f"商品原图不存在：{path}")
+        self._replace_images(paths)
+        self.uploaded_urls = []
+        job = getattr(self, "auto_jobs", {}).get(str(getattr(self, "active_job_id", "") or ""))
+        if job:
+            job.pop("variant", None)
+            job.pop("image_fallback", None)
+        self._log(f"原图直接上架：使用 {len(paths)} 张商品图片，未生图、未合成水印")
+
     def _generate_images(self):
+        if self._original_images_mode():
+            self._use_original_images()
+            return
         references = self.source_images or self.local_images
         if not references:
             raise ValueError("请先解析链接下载原图，或手动选择参考图")
@@ -4675,6 +4700,9 @@ class RfbsListingApp(WbUiMixin):
         )
 
     def _prepare_local_images_for_upload(self):
+        if self._original_images_mode():
+            self._use_original_images()
+            return
         references = list(self.source_images or self.local_images)[:15]
         if not references:
             raise ValueError("本地新品模式请至少选择 1 张成品图片")
@@ -4702,6 +4730,9 @@ class RfbsListingApp(WbUiMixin):
         self._log(message)
 
     def _generate_amazon_local_main(self):
+        if self._original_images_mode():
+            self._use_original_images()
+            return
         references = list(self.source_images or self.local_images)[:15]
         if not references:
             raise ValueError("请先为新品选择至少 1 张商品图片")
