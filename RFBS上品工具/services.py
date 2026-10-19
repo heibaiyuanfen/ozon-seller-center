@@ -618,7 +618,7 @@ def _flatten_response_text(value: Any) -> str:
 def _copywriting_content(payload: Any) -> Any:
     if not isinstance(payload, dict):
         raise ValueError("响应顶层不是 JSON 对象")
-    if any(key in payload for key in ("title_ru", "title", "description_ru", "description")):
+    if any(key in payload for key in ("title_ru", "title", "description_ru", "description", "tags_ru", "tags", "keywords")):
         return payload
     error = payload.get("error")
     if error:
@@ -1369,7 +1369,9 @@ class CopywritingService:
                     selections[attribute_id] = chosen
         return selections
 
-    def generate(self, reference: ReferenceProduct) -> dict[str, Any]:
+    def generate(self, reference: ReferenceProduct, *, reuse_source_copy=False) -> dict[str, Any]:
+        if reuse_source_copy and (not reference.title.strip() or not reference.description.strip()):
+            raise ValueError("来源标题或描述为空，请补齐来源俄文文案后继续；不会自动改写或补造")
         if not self.api_url or not self.api_key or not self.model:
             raise ValueError("请先填写文案 API 地址、密钥和模型")
         facts = {
@@ -1378,12 +1380,19 @@ class CopywritingService:
             "source_properties": reference.properties,
             "source_hashtags": reference.tags,
         }
-        prompt = (
+        copy_instruction = (
+            "Reuse of the source title and description is handled by the program. Do not rewrite or return "
+            "either field. Based only on the supplied Ozon product facts, return one JSON object and no "
+            "markdown with exactly: tags_ru (array of 25-30 unique Russian search phrases). "
+            if reuse_source_copy else
             "Based only on the supplied Ozon product facts, write sale-ready Russian copy. "
+            "Return one JSON object and no markdown with exactly: title_ru (string, clear and concise), "
+            "description_ru (string, readable product description), tags_ru (array of 25-30 unique Russian search phrases). "
+        )
+        prompt = (
+            copy_instruction +
             "Never invent specifications, certifications, materials, brand, warranty, package contents, "
-            "compatibility, or performance. Preserve factual model/brand/numbers. Return one JSON object "
-            "and no markdown with exactly: title_ru (string, clear and concise), description_ru "
-            "(string, readable product description), tags_ru (array of 25-30 unique Russian search phrases). "
+            "compatibility, or performance. Preserve factual model/brand/numbers. "
             "Build tags for Russian marketplace search intent: start with exact product-type queries, then "
             "common synonyms, use cases, audience/room/style, and factual material or features only when the "
             "facts support them. Use natural phrases a Russian buyer would type, not random grammatical-case "
@@ -1422,6 +1431,9 @@ class CopywritingService:
             value = _json_object_from_content(content)
             title = re.sub(r"\s+", " ", str(value.get("title_ru") or value.get("title") or "")).strip()
             description = str(value.get("description_ru") or value.get("description") or "").strip()
+            if reuse_source_copy:
+                title = reference.title.strip()
+                description = reference.description.strip()
             raw_tags = value.get("tags_ru") or value.get("tags") or value.get("keywords") or []
             if isinstance(raw_tags, str):
                 raw_tags = re.split(r"[,;\n]+", raw_tags)

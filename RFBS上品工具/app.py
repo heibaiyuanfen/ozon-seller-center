@@ -63,6 +63,7 @@ WORKSPACE_FIELD_KEYS = (
     "advertising_percent", "cargo_loss_percent", "fbp_pricing",
 )
 JOB_INPUT_KEYS = (
+    "image_mode",
     "listing_mode", "ozon_shop_id", "ozon_shop_name", "source_url", "amazon_source", "amazon_generate_main", "supplier_1688_url", "offer_id", "model_name", "price", "old_price", "net_weight", "weight",
     "depth", "width", "height", "category_display", "category_id", "type_id",
     "warehouse_id", "stock", "watermark_path", "image_prompt", "currency_code",
@@ -771,6 +772,11 @@ class RfbsListingApp(WbUiMixin):
             foreground="#8a5a00",
         ).grid(row=2, column=2, columnspan=6, sticky="w", padx=4, pady=3)
         self.price_breakdown_var = tk.StringVar(value="费用预估：待计算")
+        image_modes = ttk.Frame(pricing)
+        image_modes.grid(row=4, column=0, columnspan=8, sticky="w", padx=4, pady=3)
+        ttk.Label(image_modes, text="图片处理：").pack(side=tk.LEFT)
+        for label, mode in (("原图直传（不生图、不加水印）", "original"), ("API 生图", "api"), ("Codex 桌面任务", "codex_desktop")):
+            ttk.Radiobutton(image_modes, text=label, variable=self._var("image_mode", "api"), value=mode).pack(side=tk.LEFT, padx=4)
         ttk.Label(pricing, textvariable=self.price_breakdown_var, foreground="#245a8d").grid(
             row=3, column=0, columnspan=8, sticky="w", padx=4, pady=3,
         )
@@ -2286,11 +2292,12 @@ class RfbsListingApp(WbUiMixin):
         if stock < 0:
             raise ValueError("可售库存不能小于 0")
         watermark_path = str(values.get("watermark_path") or "").strip()
-        if not self._original_images_mode() and not local_mode and not Path(watermark_path).is_file():
+        original_images = self._original_images_mode(values)
+        if not original_images and not local_mode and not Path(watermark_path).is_file():
             raise ValueError("请先在“商品与图片”页面选择有效的水印文件")
-        if not self._original_images_mode() and local_mode and watermark_path and not Path(watermark_path).is_file():
+        if not original_images and local_mode and watermark_path and not Path(watermark_path).is_file():
             raise ValueError("已填写的水印文件不存在；请重新选择或留空")
-        if not self._original_images_mode() and local_mode and str(values.get("unique_main_image") or "0") == "1":
+        if not original_images and local_mode and str(values.get("unique_main_image") or "0") == "1":
             image_config = self._config()["image"]
             if not all(str(image_config.get(key) or "").strip() for key in ("api_url", "api_key", "model")):
                 raise ValueError("多店铺新品会为每店生成独立主图，请先填写生图 API 地址、密钥和模型")
@@ -2501,6 +2508,7 @@ class RfbsListingApp(WbUiMixin):
             f"上品模式：{'本地新品' if self._local_listing_enabled(inputs) else '跟卖'}\n"
             f"上品店铺：共 {len(expanded_inputs)} 家\n{shop_lines}\n货号：{inputs['offer_id']}\n"
             f"商品来源：{source_summary}\n"
+            f"图片模式：{'原图直传（不生图、不加水印）' if inputs.get('image_mode') == 'original' else inputs.get('image_mode') or '沿用服务配置'}\n"
             f"1688 采购链接：{inputs['supplier_1688_url'] or '未填写'}\n"
             f"型号名称：{inputs['model_name']}\n售价：{inputs['price']} RUB\n"
             f"核价模式：{'FBP（贴单费 0 元，佣金减 1 个百分点）' if self._fbp_pricing_enabled(inputs) else 'RFBS 标准核价'}\n"
@@ -3028,7 +3036,7 @@ class RfbsListingApp(WbUiMixin):
                 cancel_check()
             if stage < 2:
                 cancel_check()
-                self._set_auto_progress(2, f"{offer_id}：生成俄文文案和标签")
+                self._set_auto_progress(2, f"{offer_id}：{'生成俄文文案和标签' if local_mode else '复用来源俄文标题和描述，生成标签'}")
                 self._retry_step(
                     "文案生成", self._generate_copywriting, attempts=3,
                     cancel_check=cancel_check,
@@ -3038,7 +3046,10 @@ class RfbsListingApp(WbUiMixin):
                 cancel_check()
             if stage < 3:
                 cancel_check()
-                if local_mode:
+                if self._original_images_mode():
+                    self._set_auto_progress(3, f"{offer_id}：原图直传，跳过生图与水印")
+                    self._use_original_images()
+                elif local_mode:
                     image_inputs = job.get("inputs") or {}
                     generated_main = any(str(image_inputs.get(key) or "0") == "1" for key in (
                         "amazon_generate_main", "unique_main_image",
@@ -3353,6 +3364,7 @@ class RfbsListingApp(WbUiMixin):
         error_text.configure(state=tk.DISABLED)
         inputs = dict(job.get("inputs") or {})
         inputs.setdefault("listing_mode", "follow")
+        inputs.setdefault("image_mode", self._var("image_mode", "api").get())
         inputs.setdefault("local_image_paths", [])
         inputs.setdefault("advertising_percent", "15")
         inputs.setdefault("cargo_loss_percent", "10")
@@ -4154,7 +4166,7 @@ class RfbsListingApp(WbUiMixin):
             ):
                 stage = 0
                 job["state"] = {}
-            elif changed_input_keys.intersection({"watermark_path", "image_prompt", "ozon_shop_id"}):
+            elif changed_input_keys.intersection({"image_mode", "watermark_path", "image_prompt", "ozon_shop_id"}):
                 stage = min(stage, 2)
             elif any(updated_inputs.get(key) != old_inputs.get(key) for key in ("category_display", "category_id", "type_id", "net_weight")):
                 stage = min(stage, 4)
@@ -4306,11 +4318,14 @@ class RfbsListingApp(WbUiMixin):
                 self._retry_step("商品解析/原图下载", self._parse_url, attempts=3)
             self._ui_call(lambda: None)
 
-            self._set_auto_progress(2, "2/9 正在生成俄文标题、描述和合规标签")
+            self._set_auto_progress(2, "2/9 正在生成俄文标题、描述和合规标签" if local_mode else "2/9 正在复用来源俄文标题和描述，生成合规标签")
             self._retry_step("文案生成", self._generate_copywriting, attempts=3)
             self._ui_call(lambda: None)
 
-            if local_mode:
+            if self._original_images_mode():
+                self._set_auto_progress(3, "3/9 原图直传，跳过生图与水印")
+                self._use_original_images()
+            elif local_mode:
                 amazon_main = self._job_var("amazon_generate_main", "0").get() == "1"
                 if amazon_main:
                     self._set_auto_progress(3, "3/9 正在生成精确 3:4 Ozon 亚马逊新品主图")
@@ -4721,7 +4736,9 @@ class RfbsListingApp(WbUiMixin):
                 report, lambda: self._check_auto_job_cancelled(job) if job else None)
         return ImageGenerationService(cfg["api_url"], cfg["api_key"], cfg["model"])
 
-    def _original_images_mode(self):
+    def _original_images_mode(self, inputs=None):
+        if inputs and inputs.get("image_mode"):
+            return inputs["image_mode"] == "original"
         variable = getattr(self, "vars", {}).get("image_mode")
         return variable is not None and variable.get() == "original"
 
@@ -4869,7 +4886,8 @@ class RfbsListingApp(WbUiMixin):
         )
 
     def _generate_copywriting(self):
-        if self._active_listing_is_local():
+        local_mode = self._active_listing_is_local()
+        if local_mode:
             self.reference = self._reference_from_local_vision(
                 self._ensure_vision_analysis(),
             )
@@ -4880,7 +4898,7 @@ class RfbsListingApp(WbUiMixin):
         if service.api_url != cfg["api_url"].rstrip("/"):
             self.root.after(0, lambda: self.vars["text_api_url"].set(service.api_url))
             self._log("文案接口地址已自动补全为：" + service.api_url)
-        result = service.generate(self.reference)
+        result = service.generate(self.reference, reuse_source_copy=not local_mode)
         completed_tags = complete_ozon_hashtags(result["tags_ru"], result["title_ru"])
         if len(completed_tags) < 25:
             raise RuntimeError(
@@ -4894,7 +4912,11 @@ class RfbsListingApp(WbUiMixin):
             self.vars["tags"].set(format_ozon_hashtags(result["tags_ru"]))
             self._prefill_content_attributes()
         self.root.after(0, update_fields)
-        self._log(f"俄文标题、描述和 {len(result['tags_ru'])} 个标签已生成；请人工核对商品事实")
+        self._log(
+            f"俄文标题、描述和 {len(result['tags_ru'])} 个标签已生成；请人工核对商品事实"
+            if local_mode else
+            f"已复用来源俄文标题和描述，AI 仅生成 {len(result['tags_ru'])} 个标签；请人工核对商品事实"
+        )
 
     def _watermark_images(self):
         paths = WatermarkService.apply(self.local_images, self.vars["watermark_path"].get(), str(OUTPUT_DIR / "watermarked"))
