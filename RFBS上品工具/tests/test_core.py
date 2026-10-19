@@ -2111,7 +2111,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(other_job["status"], "queued")
         self.assertIn("其他排队任务继续", app.auto_status_var.value)
 
-    def test_clear_finished_jobs_removes_persisted_history_but_keeps_active_jobs(self):
+    def test_clear_finished_jobs_hides_history_and_keeps_all_data(self):
         class Value:
             def __init__(self):
                 self.value = ""
@@ -2136,11 +2136,16 @@ class CoreTests(unittest.TestCase):
         with patch("app.messagebox.askyesno", return_value=True):
             app._clear_finished_jobs()
 
-        self.assertEqual(set(app.auto_jobs), {"queued", "running"})
-        self.assertEqual(app.auto_job_order, ["queued", "running"])
+        self.assertEqual(set(app.auto_jobs), {"done", "failed", "queued", "running"})
+        self.assertEqual(app.auto_job_order, ["done", "failed", "queued", "running"])
+        self.assertTrue(app.auto_jobs["done"]["record_hidden"])
+        self.assertTrue(app.auto_jobs["failed"]["record_hidden"])
+        self.assertFalse(app.auto_jobs["running"].get("record_hidden", False))
         self.assertEqual(saved, [True])
         self.assertEqual(refreshed, [True])
         self.assertIn("已清除 2 条", app.auto_status_var.value)
+        app._restore_finished_jobs()
+        self.assertFalse(any(job.get("record_hidden") for job in app.auto_jobs.values()))
 
     def test_running_selected_job_stops_at_boundary_and_other_job_continues(self):
         class Value:

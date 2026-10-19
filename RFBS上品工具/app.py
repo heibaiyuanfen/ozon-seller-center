@@ -327,6 +327,70 @@ class RfbsListingApp(WbUiMixin):
         self._build_attributes()
         self._build_execute()
         self._build_wb()
+        from supplier_ui import SupplierPanel
+        self.supplier_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.supplier_tab, text="9. 1688 图片与变体")
+        try:
+            self.supplier_panel = SupplierPanel(self.supplier_tab, APP_DIR / "supplier-1688", self._apply_supplier_variant, self._enqueue_supplier_variants, self._supplier_image_service)
+            self.supplier_panel.pack(fill=tk.BOTH, expand=True)
+        except (OSError, ValueError) as error:
+            ttk.Label(self.supplier_tab, text=f"1688 工作区读取失败：{error}").pack(padx=12, pady=12)
+
+    def _apply_supplier_variant(self, product, variant):
+        if not variant.get("images"):
+            raise ValueError("请先为当前变体选择图片")
+        for path in variant["images"]:
+            if not Path(path).is_file():
+                raise FileNotFoundError(f"变体图片不存在：{path}")
+        self._job_var("listing_mode").set("local")
+        self._on_listing_mode_changed()
+        self._job_var("source_url").set("")
+        self._job_var("supplier_1688_url").set(product["url"])
+        for key in ("offer_id", "model_name", "purchase_cost", "weight", "depth", "width", "height"):
+            self._job_var(key).set(str(variant.get(key) or ""))
+        self._job_var("net_weight").set(str(variant.get("weight") or ""))
+        self._job_var("amazon_source").set("")
+        self._set_job_local_image_paths(variant["images"])
+        self._job_var("amazon_generate_main").set("0")
+        self._job_var("unique_main_image").set("0")
+        self.notebook.select(self.workbench_tab)
+        self._log(f"已载入 1688 变体：{variant['name']}；货号 {variant['offer_id']}；请选择类目并核对核价和包装参数后加入队列")
+
+    def _enqueue_supplier_variants(self, product, variants):
+        if not variants:
+            raise ValueError("没有可上架的变体")
+        base = self._job_inputs_from_form()
+        planned = []
+        for variant in variants:
+            values = copy.deepcopy(base)
+            values.update(listing_mode="local", source_url="", amazon_source="", amazon_generate_main="0", unique_main_image="0",
+                supplier_1688_url=product["url"], local_image_paths=list(variant.get("images") or []))
+            for key in ("offer_id", "purchase_cost", "weight", "depth", "width", "height"):
+                values[key] = str(variant.get(key) or "")
+            values["net_weight"] = values["weight"]
+            values["model_name"] = variant.get("model_name") or base.get("model_name") or ("1688-" + product["id"][:16])
+            group_id = "1688-" + uuid.uuid4().hex
+            try:
+                expanded = self._expand_job_inputs_for_shops(values, group_id)
+                for inputs in expanded:
+                    self._validate_job_inputs(inputs)
+            except Exception as error:
+                raise ValueError(f"变体 {variant['name']}：{error}") from error
+            planned.extend(expanded)
+        keys = [(inputs["ozon_shop_id"], inputs["offer_id"]) for inputs in planned]
+        if len(set(keys)) != len(keys):
+            raise ValueError("变体货号重复，请先修改货号")
+        with self.auto_job_lock:
+            existing = {(job.get("inputs", {}).get("ozon_shop_id"), job.get("inputs", {}).get("offer_id")) for job in self.auto_jobs.values()}
+        if any(key in existing for key in keys):
+            raise ValueError("部分货号已有上架记录，请使用任务重试或为新品生成新货号")
+        summary = "\n".join(f"{inputs['ozon_shop_name']} / {inputs['offer_id']} / 售价 {inputs['price']}" for inputs in planned)
+        if not messagebox.askyesno("批量上架变体", f"共 {len(variants)} 个变体，{len(planned)} 个店铺任务。\n使用工作台当前店铺、类目、佣金、ROI 和库存设置。\n{summary}\n\n是否加入队列并开始运行？"):
+            return
+        self.listing_worker_limit = max(3, self._listing_concurrency())
+        self.listing_workers_var.set(self.listing_worker_limit)
+        self._enqueue_prepared_inputs(planned, "1688 批量变体")
+        self.notebook.select(self.workbench_tab)
 
     def _build_product_pool(self):
         tab = self.product_pool_tab
@@ -805,6 +869,7 @@ class RfbsListingApp(WbUiMixin):
         ttk.Button(controls, text="继续/重试选中任务", command=self._retry_selected_job).pack(side=tk.LEFT, padx=6)
         ttk.Button(controls, text="停止选中任务", command=self._stop_selected_job).pack(side=tk.LEFT, padx=6)
         ttk.Button(controls, text="清除已结束任务", command=self._clear_finished_jobs).pack(side=tk.LEFT, padx=6)
+        ttk.Button(controls, text="恢复已清除记录", command=self._restore_finished_jobs).pack(side=tk.LEFT, padx=6)
         ttk.Button(controls, text="清理已完成图片", command=self._cleanup_completed_job_images).pack(side=tk.LEFT, padx=6)
         self._on_listing_mode_changed()
 
@@ -2383,6 +2448,8 @@ class RfbsListingApp(WbUiMixin):
             "stopping": "停止中", "cancelled": "已停止",
         }
         for job_id, job in jobs:
+            if job.get("record_hidden"):
+                continue
             values = job.get("inputs") or {}
             source = str(values.get("source_url") or "")
             article = re.search(r"\d{6,}", source)
@@ -2444,34 +2511,11 @@ class RfbsListingApp(WbUiMixin):
         )
         if not messagebox.askyesno("加入自动上架队列", summary):
             return
-        now = time.strftime("%Y-%m-%d %H:%M:%S")
-        jobs = []
-        for inputs in expanded_inputs:
-            job_id = group_id + "-" + uuid.uuid4().hex[:6]
-            if self._local_listing_enabled(inputs):
-                try:
-                    inputs["local_image_paths"] = self._snapshot_local_job_images(
-                        inputs.get("local_image_paths") or [], inputs["offer_id"], job_id,
-                    )
-                except Exception as error:
-                    messagebox.showerror("本地图片保存失败", str(error))
-                    return
-            jobs.append({
-                "id": job_id, "created_at": now, "updated_at": now,
-                "status": "queued", "stage": 0, "failed_stage": 0,
-                "inputs": inputs, "state": {}, "error": "", "message": "等待运行",
-                "task_id": 0, "import_completed": False, "stock_completed": False,
-                "ledger_completed": False, "cancel_requested": False,
-            })
-        with self.auto_job_lock:
-            for job in jobs:
-                self.auto_jobs[job["id"]] = job
-                self.auto_job_order.append(job["id"])
-            self._save_auto_jobs()
-        for job in jobs:
-            self.auto_job_queue.put(job["id"])
-        self._schedule_job_prefetch(jobs)
-        self._refresh_job_tree()
+        try:
+            self._enqueue_prepared_inputs(expanded_inputs, inputs['offer_id'])
+        except Exception as error:
+            messagebox.showerror("加入队列失败", str(error))
+            return
         self.job_form_vars["source_url"].set("")
         self._job_var("amazon_source").set("")
         self._job_var("amazon_generate_main", "0").set("0")
@@ -2482,8 +2526,44 @@ class RfbsListingApp(WbUiMixin):
         self.job_form_vars["model_name"].set("")
         if self._local_listing_enabled(inputs):
             self._clear_job_local_images()
+
+    def _enqueue_prepared_inputs(self, expanded_inputs, label):
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        jobs = []
+        for inputs in expanded_inputs:
+            job_id = str(inputs.get("product_group_id") or "batch") + "-" + uuid.uuid4().hex[:12]
+            if self._local_listing_enabled(inputs):
+                try:
+                    inputs["local_image_paths"] = self._snapshot_local_job_images(
+                        inputs.get("local_image_paths") or [], inputs["offer_id"], job_id,
+                    )
+                except Exception as error:
+                    raise RuntimeError(f"本地图片保存失败：{error}") from error
+            jobs.append({
+                "id": job_id, "created_at": now, "updated_at": now,
+                "status": "queued", "stage": 0, "failed_stage": 0,
+                "inputs": inputs, "state": {}, "error": "", "message": "等待运行",
+                "task_id": 0, "import_completed": False, "stock_completed": False,
+                "ledger_completed": False, "cancel_requested": False,
+            })
+        with self.auto_job_lock:
+            previous_order = list(self.auto_job_order)
+            for job in jobs:
+                self.auto_jobs[job["id"]] = job
+                self.auto_job_order.append(job["id"])
+            try:
+                self._save_auto_jobs()
+            except Exception:
+                for job in jobs:
+                    self.auto_jobs.pop(job["id"], None)
+                self.auto_job_order = previous_order
+                raise
+        for job in jobs:
+            self.auto_job_queue.put(job["id"])
+        self._schedule_job_prefetch(jobs)
+        self._refresh_job_tree()
         self.auto_status_var.set(
-            f"已将 {inputs['offer_id']} 展开为 {len(jobs)} 个店铺任务；现在可以填写下一件商品"
+            f"已将 {label} 加入 {len(jobs)} 个店铺任务；现在可以填写下一件商品"
         )
         self._start_auto_job_worker()
 
@@ -3029,6 +3109,7 @@ class RfbsListingApp(WbUiMixin):
             removable_ids = [
                 job_id for job_id in self.auto_job_order
                 if str((self.auto_jobs.get(job_id) or {}).get("status") or "") in removable_statuses
+                and not self.auto_jobs[job_id].get("record_hidden")
             ]
         if not removable_ids:
             messagebox.showinfo(
@@ -3038,8 +3119,7 @@ class RfbsListingApp(WbUiMixin):
             return
         if not messagebox.askyesno(
             "清除已结束任务",
-            f"将永久删除 {len(removable_ids)} 条已完成、已停止或待修复的任务记录及其断点。\n"
-            "排队中、运行中和停止中的任务不会被删除。是否继续？",
+            f"将从列表隐藏 {len(removable_ids)} 条结束记录。\n任务、断点、图片、台账和平台数据全部保留，可恢复记录。是否继续？",
         ):
             return
         with self.auto_job_lock:
@@ -3047,15 +3127,21 @@ class RfbsListingApp(WbUiMixin):
                 job_id for job_id in removable_ids
                 if str((self.auto_jobs.get(job_id) or {}).get("status") or "") in removable_statuses
             ]
-            removable_set = set(removable_ids)
             for job_id in removable_ids:
-                self.auto_jobs.pop(job_id, None)
-            self.auto_job_order = [
-                job_id for job_id in self.auto_job_order if job_id not in removable_set
-            ]
+                self.auto_jobs[job_id]["record_hidden"] = True
             self._save_auto_jobs()
         self._refresh_job_tree()
         self.auto_status_var.set(f"已清除 {len(removable_ids)} 条结束任务记录；运行和排队任务已保留")
+
+    def _restore_finished_jobs(self):
+        with self.auto_job_lock:
+            count = 0
+            for job in self.auto_jobs.values():
+                if job.pop("record_hidden", False):
+                    count += 1
+            self._save_auto_jobs()
+        self._refresh_job_tree()
+        self.auto_status_var.set(f"已恢复 {count} 条任务记录")
 
     @staticmethod
     def _job_image_paths(job: dict) -> set[Path]:
@@ -4611,6 +4697,13 @@ class RfbsListingApp(WbUiMixin):
         self.root.clipboard_clear()
         self.root.clipboard_append(prompt)
         messagebox.showinfo("Codex 任务指令已复制", "请在同一台电脑的 Codex 桌面端发送已复制的指令。")
+
+    def _supplier_image_service(self, metadata, log):
+        cfg = self._config()["image"]
+        if cfg.get("mode") == "codex_desktop":
+            from codex_images import CodexDesktopImages
+            return CodexDesktopImages(APP_DIR / "codex-image-tasks", metadata, log)
+        return ImageGenerationService(cfg["api_url"], cfg["api_key"], cfg["model"])
 
     def _image_generation_service(self, cfg):
         if cfg.get("mode") == "codex_desktop":
