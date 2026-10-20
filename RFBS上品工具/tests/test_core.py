@@ -28,45 +28,45 @@ from shop_variants import shop_offer_id
 
 class CoreTests(unittest.TestCase):
     def test_shipping_formula_matches_spreadsheet_and_price_boundaries(self):
-        self.assertEqual(calculate_shipping("85", "0.6"), Decimal("41.570"))
-        self.assertEqual(calculate_shipping("134", "0.4"), Decimal("14.610"))
+        self.assertEqual(calculate_shipping("85", "0.6"), Decimal("37.29"))
+        self.assertEqual(calculate_shipping("120", "0.4"), Decimal("14.610"))
         self.assertEqual(calculate_shipping("135", "0.4"), Decimal("29.210"))
-        self.assertEqual(calculate_shipping("134", "0.5"), Decimal("38.760"))
-        self.assertEqual(calculate_shipping("135", "2"), Decimal("96.640"))
-        self.assertEqual(calculate_shipping("635", "5"), Decimal("193.000"))
-        self.assertEqual(calculate_shipping("635", "5.01"), Decimal("195.580"))
+        self.assertEqual(calculate_shipping("120", "0.5"), Decimal("17.42"))
+        self.assertEqual(calculate_shipping("135", "2"), Decimal("74.17"))
+        self.assertEqual(calculate_shipping("635", "5"), Decimal("165.21"))
+        self.assertEqual(calculate_shipping("635", "5.01"), Decimal("198.90"))
         with self.assertRaisesRegex(ValueError, "超出运费公式"):
-            calculate_shipping("635", "30")
+            calculate_shipping("635", "30.001")
 
-    def test_shipping_rounds_billable_weight_up_to_each_tenth_kg(self):
-        self.assertEqual(calculate_shipping("100", "0.01"), Decimal("6.180"))
+    def test_shipping_uses_actual_weight_without_tenth_kg_rounding(self):
+        self.assertEqual(calculate_shipping("100", "0.01"), Decimal("3.65"))
         self.assertEqual(calculate_shipping("100", "0.10"), Decimal("6.180"))
-        self.assertEqual(calculate_shipping("100", "0.11"), Decimal("8.990"))
-        self.assertEqual(calculate_shipping("100", "0.41"), Decimal("17.420"))
-        self.assertEqual(calculate_shipping("200", "1.91"), Decimal("74.170"))
-        self.assertEqual(calculate_shipping("700", "4.91"), Decimal("121.330"))
+        self.assertEqual(calculate_shipping("100", "0.11"), Decimal("6.46"))
+        self.assertEqual(calculate_shipping("100", "0.41"), Decimal("14.89"))
+        self.assertEqual(calculate_shipping("200", "1.91"), Decimal("71.64"))
+        self.assertEqual(calculate_shipping("700", "4.91"), Decimal("162.68"))
 
     def test_shipping_tariffs_use_actual_weight_at_every_boundary(self):
         cases = (
-            ("100", "0.31", "14.610"),
+            ("100", "0.31", "12.08"),
             ("100", "0.4", "14.610"),
-            ("100", "0.401", "17.420"),
-            ("100", "0.499", "17.420"),
-            ("100", "0.5", "38.760"),
-            ("100", "0.501", "41.570"),
+            ("100", "0.401", "14.64"),
+            ("100", "0.499", "17.39"),
+            ("100", "0.5", "17.42"),
+            ("100", "0.501", "35.40"),
             ("200", "1.9", "71.360"),
-            ("200", "1.901", "74.170"),
-            ("200", "1.999", "74.170"),
-            ("200", "2", "96.640"),
-            ("200", "2.001", "99.450"),
-            ("700", "4.9", "119.420"),
-            ("700", "4.901", "121.330"),
-            ("700", "4.999", "121.330"),
-            ("700", "5", "193.000"),
-            ("700", "5.001", "195.580"),
-            ("100", "29.999", "867.710"),
-            ("200", "29.999", "883.440"),
-            ("700", "29.999", "838.000"),
+            ("200", "1.901", "71.39"),
+            ("200", "1.999", "74.14"),
+            ("200", "2", "74.17"),
+            ("200", "2.001", "96.67"),
+            ("700", "4.9", "162.40"),
+            ("700", "4.901", "162.43"),
+            ("700", "4.999", "165.18"),
+            ("700", "5", "165.21"),
+            ("700", "5.001", "198.67"),
+            ("100", "29.999", "598.81"),
+            ("200", "29.999", "883.41"),
+            ("700", "29.999", "843.61"),
         )
         for price, weight, expected in cases:
             with self.subTest(price=price, weight=weight):
@@ -74,7 +74,7 @@ class CoreTests(unittest.TestCase):
         for price in ("100", "200", "700"):
             with self.subTest(price=price):
                 with self.assertRaisesRegex(ValueError, "超出运费公式"):
-                    calculate_shipping(price, "30")
+                    calculate_shipping(price, "30.001")
 
     def test_screenshot_roi_pricing_does_not_promote_410g_base_fee(self):
         results = {}
@@ -83,11 +83,11 @@ class CoreTests(unittest.TestCase):
                 "19", "3", "30", Decimal(grams) / 1000,
                 sales_commission_percent="12", advertising_percent="0", cargo_loss_percent="3",
             )
-        self.assertEqual(results[310].shipping, results[400].shipping)
-        self.assertEqual(results[410].shipping - results[400].shipping, Decimal("2.810"))
-        self.assertEqual(results[410].shipping, Decimal("17.420"))
-        self.assertEqual(results[410].price, Decimal("55"))
-        self.assertEqual(results[500].shipping, Decimal("38.760"))
+        self.assertLess(results[310].shipping, results[400].shipping)
+        self.assertEqual(results[410].shipping - results[400].shipping, Decimal("0.28"))
+        self.assertEqual(results[410].shipping, Decimal("14.89"))
+        self.assertEqual(results[410].price, Decimal("52"))
+        self.assertEqual(results[500].shipping, Decimal("17.42"))
         for grams, result in results.items():
             with self.subTest(grams=grams):
                 previous = calculate_price_breakdown(
@@ -101,14 +101,14 @@ class CoreTests(unittest.TestCase):
         breakdown = calculate_roi_price(
             "15", "2", "60", "0.6", sales_commission_percent="12",
         )
-        self.assertEqual(breakdown.price, Decimal("106"))
-        self.assertEqual(breakdown.shipping, Decimal("41.570"))
+        self.assertEqual(breakdown.price, Decimal("99"))
+        self.assertEqual(breakdown.shipping, Decimal("37.29"))
         self.assertEqual(breakdown.sales_commission_rate, Decimal("0.12"))
         self.assertEqual(breakdown.invested, Decimal("17"))
         self.assertGreaterEqual(breakdown.roi_percent, Decimal("60"))
 
         previous_price_profit = (
-            Decimal("105") * Decimal("0.71")
+            Decimal("98") * Decimal("0.71")
             - breakdown.invested - breakdown.shipping - breakdown.cargo_loss
         )
         self.assertLess(previous_price_profit / breakdown.invested * Decimal("100"), Decimal("60"))
@@ -123,7 +123,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(breakdown.sales_commission, Decimal("25.76"))
         with self.assertRaisesRegex(ValueError, "超出运费公式"):
             calculate_roi_price(
-                "15", "2", "60", "30", sales_commission_percent="14",
+                "15", "2", "60", "30.001", sales_commission_percent="14",
             )
 
     def test_roi_price_uses_manually_entered_commission(self):
@@ -142,11 +142,11 @@ class CoreTests(unittest.TestCase):
 
     def test_current_price_breakdown_uses_manually_entered_commission(self):
         breakdown = calculate_price_breakdown("112", "15", "2", "0.6", "20")
-        self.assertEqual(breakdown.shipping, Decimal("41.570"))
+        self.assertEqual(breakdown.shipping, Decimal("37.29"))
         self.assertEqual(breakdown.sales_commission, Decimal("22.4"))
         self.assertEqual(
             breakdown.roi_percent,
-            Decimal("36.07647058823529411764705882"),
+            (Decimal("112") * Decimal("0.63") - Decimal("54.29") * Decimal("1.1")) / Decimal("17") * 100,
         )
 
     def test_adjustable_advertising_and_cargo_loss_rates_affect_pricing(self):
@@ -164,7 +164,7 @@ class CoreTests(unittest.TestCase):
             advertising_percent="20", cargo_loss_percent="5",
         )
         self.assertEqual(current.advertising, Decimal("20"))
-        self.assertEqual(current.cargo_loss, Decimal("2.92850"))
+        self.assertEqual(current.cargo_loss, Decimal("2.7145"))
         with self.assertRaisesRegex(ValueError, "广告费率必须小于 100%"):
             calculate_roi_price(
                 "15", "2", "60", "0.6", sales_commission_percent="12",
@@ -194,7 +194,7 @@ class CoreTests(unittest.TestCase):
             sales_commission_percent="12",
             sales_commission_discount_percent="1",
         )
-        self.assertEqual(breakdown.price, Decimal("99"))
+        self.assertEqual(breakdown.price, Decimal("93"))
         self.assertEqual(breakdown.sales_commission_rate, Decimal("0.11"))
         self.assertEqual(breakdown.invested, Decimal("15"))
         self.assertGreaterEqual(breakdown.roi_percent, Decimal("60"))
@@ -211,7 +211,7 @@ class CoreTests(unittest.TestCase):
             "purchase_cost": "15", "label_fee": "99", "target_roi": "60",
             "sales_commission_percent": "12", "weight": "600", "fbp_pricing": "1",
         })
-        self.assertEqual(breakdown.price, Decimal("99"))
+        self.assertEqual(breakdown.price, Decimal("93"))
         self.assertEqual(breakdown.invested, Decimal("15"))
         self.assertEqual(breakdown.sales_commission_rate, Decimal("0.11"))
 
@@ -2317,6 +2317,7 @@ class CoreTests(unittest.TestCase):
             self.skipTest(f"Tk 不可用：{error}")
         try:
             app = object.__new__(RfbsListingApp)
+            app.vars = {}
             app.root = root
             app.category_displays = []
             app.category_by_display = {}

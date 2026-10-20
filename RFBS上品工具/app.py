@@ -56,6 +56,7 @@ WB_JOB_PATH = APP_DIR / "wb_job.json"
 NO_BRAND_DICTIONARY_ID = 126745801
 NO_BRAND_DICTIONARY_VALUE = "Нет бренда"
 WORKSPACE_FIELD_KEYS = (
+    "shipping_exchange_rate",
     "listing_mode", "source_url", "amazon_source", "supplier_1688_url", "title", "tags", "price", "old_price", "currency_code", "net_weight", "weight", "weight_unit",
     "depth", "width", "height", "dimension_unit", "vat", "offer_id", "model_name", "image_prompt",
     "watermark_path", "category_display", "category_id", "type_id", "warehouse_id", "stock",
@@ -63,6 +64,7 @@ WORKSPACE_FIELD_KEYS = (
     "advertising_percent", "cargo_loss_percent", "fbp_pricing",
 )
 JOB_INPUT_KEYS = (
+    "shipping_exchange_rate",
     "image_mode",
     "listing_mode", "ozon_shop_id", "ozon_shop_name", "source_url", "amazon_source", "amazon_generate_main", "supplier_1688_url", "offer_id", "model_name", "price", "old_price", "net_weight", "weight",
     "depth", "width", "height", "category_display", "category_id", "type_id",
@@ -215,6 +217,7 @@ class RfbsListingApp(WbUiMixin):
             "0" if fbp_pricing else values.get("label_fee", ""),
             values.get("target_roi", ""), weight_kg,
             sales_commission_percent=values.get("sales_commission_percent", ""),
+            exchange_rate=values.get("shipping_exchange_rate", "12.5"),
             sales_commission_discount_percent="1" if fbp_pricing else "0",
             advertising_percent=values.get("advertising_percent") or "15",
             cargo_loss_percent=values.get("cargo_loss_percent") or "10",
@@ -226,6 +229,7 @@ class RfbsListingApp(WbUiMixin):
 
     def _update_job_price(self, *_args):
         keys = (
+            "shipping_exchange_rate",
             "purchase_cost", "label_fee", "target_roi", "advertising_percent",
             "cargo_loss_percent", "sales_commission_percent", "weight",
         )
@@ -251,6 +255,10 @@ class RfbsListingApp(WbUiMixin):
             return
         self.job_form_vars["price"].set(format(breakdown.price, "f"))
         pricing_mode = "FBP" if self._fbp_pricing_enabled(values) else "RFBS"
+        cargo_value = breakdown.price * Decimal(values.get("shipping_exchange_rate", "12.5"))
+        actual_weight = Decimal(values["weight"]) / Decimal("1000")
+        value_band = 1 if cargo_value <= 1500 else 2 if cargo_value <= 7000 else 3
+        tariff = value_band if actual_weight <= (Decimal("0.5"), Decimal("2"), Decimal("5"))[value_band - 1] else value_band + 3
         self.price_breakdown_var.set(
             "{mode} 费用预估：运费 {shipping} | 销售佣金 {sales_rate}%：{sales} | 物流佣金 {logistics} | "
             "广告 {advertising_rate}%：{advertising} | 货损 {loss_rate}%：{loss} | "
@@ -267,6 +275,7 @@ class RfbsListingApp(WbUiMixin):
                 profit=self._pricing_amount(breakdown.profit),
                 roi=self._pricing_amount(breakdown.roi_percent),
             )
+            + f" | 货值 {self._pricing_amount(cargo_value)} RUB | 档位 {tariff} | 实重 {actual_weight} kg"
         )
 
     def _on_fbp_pricing_changed(self):
@@ -721,6 +730,7 @@ class RfbsListingApp(WbUiMixin):
             local_images, textvariable=self.job_local_images_status_var, foreground="#245a8d",
         ).grid(row=0, column=2, sticky="w")
         pricing_defaults = (
+            ("shipping_exchange_rate", "12.5"),
             ("purchase_cost", ""), ("label_fee", "2"), ("target_roi", "60"),
             ("sales_commission_percent", ""),
             ("advertising_percent", "15"), ("cargo_loss_percent", "10"),
@@ -773,7 +783,10 @@ class RfbsListingApp(WbUiMixin):
         ).grid(row=2, column=2, columnspan=6, sticky="w", padx=4, pady=3)
         self.price_breakdown_var = tk.StringVar(value="费用预估：待计算")
         image_modes = ttk.Frame(pricing)
-        image_modes.grid(row=4, column=0, columnspan=8, sticky="w", padx=4, pady=3)
+        image_modes.grid(row=5, column=0, columnspan=8, sticky="w", padx=4, pady=3)
+        ttk.Label(pricing, text="汇率：1 CNY = RUB").grid(row=4, column=0, sticky="w", padx=4)
+        ttk.Entry(pricing, textvariable=self._job_var("shipping_exchange_rate", "12.5"), width=13).grid(row=4, column=1, sticky="ew", padx=4)
+        self.job_form_vars["shipping_exchange_rate"].trace_add("write", self._update_job_price)
         ttk.Label(image_modes, text="图片处理：").pack(side=tk.LEFT)
         for label, mode in (("原图直传（不生图、不加水印）", "original"), ("API 生图", "api"), ("Codex 桌面任务", "codex_desktop")):
             ttk.Radiobutton(image_modes, text=label, variable=self._var("image_mode", "api"), value=mode).pack(side=tk.LEFT, padx=4)
@@ -2387,6 +2400,10 @@ class RfbsListingApp(WbUiMixin):
                 inputs["sales_commission_percent"] = ""
                 job["inputs"] = inputs
                 changed = True
+            if "shipping_exchange_rate" not in inputs:
+                inputs["shipping_exchange_rate"] = "12.5"
+                job["inputs"] = inputs
+                changed = True
             for key, default in (("advertising_percent", "15"), ("cargo_loss_percent", "10")):
                 if not str(inputs.get(key) or "").strip():
                     inputs[key] = default
@@ -3367,6 +3384,7 @@ class RfbsListingApp(WbUiMixin):
         inputs.setdefault("image_mode", self._var("image_mode", "api").get())
         inputs.setdefault("local_image_paths", [])
         inputs.setdefault("advertising_percent", "15")
+        inputs.setdefault("shipping_exchange_rate", "12.5")
         inputs.setdefault("cargo_loss_percent", "10")
         inputs.setdefault("sales_commission_percent", "")
         repair_vars = {key: tk.StringVar(value=str(inputs.get(key) or "")) for key in JOB_INPUT_KEYS}
@@ -3391,6 +3409,7 @@ class RfbsListingApp(WbUiMixin):
             ("型号名称（同名合并多变体）", "model_name"), ("采购成本", "purchase_cost"),
             ("贴单费", "label_fee"), ("目标 ROI（%）", "target_roi"),
             ("标准佣金（%）", "sales_commission_percent"),
+            ("汇率（1 CNY = RUB）", "shipping_exchange_rate"),
             ("广告费率（%）", "advertising_percent"), ("货损率（%）", "cargo_loss_percent"),
             ("自动售价", "price"), ("折扣前价格", "old_price"),
             ("商品净重(g)", "net_weight"),
@@ -6482,6 +6501,9 @@ class RfbsListingApp(WbUiMixin):
     def _commission_pricing_values(self, job_record=None) -> tuple[dict[str, str], bool]:
         inputs = (job_record or {}).get("inputs") if isinstance((job_record or {}).get("inputs"), dict) else {}
         values: dict[str, str] = {}
+        values["shipping_exchange_rate"] = str(inputs.get("shipping_exchange_rate", "12.5"))
+        if job_record is None and "shipping_exchange_rate" in self.vars:
+            values["shipping_exchange_rate"] = self.vars["shipping_exchange_rate"].get().strip()
         for key in (
             "purchase_cost", "label_fee", "target_roi", "advertising_percent",
             "cargo_loss_percent", "sales_commission_percent", "weight", "fbp_pricing",
@@ -6596,6 +6618,7 @@ class RfbsListingApp(WbUiMixin):
         current = calculate_price_breakdown(
             current_price, values["purchase_cost"], values["label_fee"],
             weight_kg, manual_commission_percent,
+            exchange_rate=values["shipping_exchange_rate"],
             sales_commission_discount_percent=commission_discount,
             advertising_percent=values["advertising_percent"],
             cargo_loss_percent=values["cargo_loss_percent"],
@@ -6608,6 +6631,7 @@ class RfbsListingApp(WbUiMixin):
             required = calculate_roi_price(
                 values["purchase_cost"], values["label_fee"], values["target_roi"],
                 weight_kg, sales_commission_percent=manual_commission_percent,
+                exchange_rate=values["shipping_exchange_rate"],
                 sales_commission_discount_percent=commission_discount,
                 advertising_percent=values["advertising_percent"],
                 cargo_loss_percent=values["cargo_loss_percent"],
@@ -6635,6 +6659,7 @@ class RfbsListingApp(WbUiMixin):
             current = calculate_price_breakdown(
                 current_price, values["purchase_cost"], values["label_fee"],
                 weight_kg, manual_commission_percent,
+                exchange_rate=values["shipping_exchange_rate"],
                 sales_commission_discount_percent=commission_discount,
                 advertising_percent=values["advertising_percent"],
                 cargo_loss_percent=values["cargo_loss_percent"],

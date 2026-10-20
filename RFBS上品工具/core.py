@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass, field
-from decimal import Decimal, InvalidOperation, ROUND_CEILING
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP, ROUND_FLOOR
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -80,38 +80,29 @@ def _pricing_decimal(value, label: str, *, allow_zero: bool = False) -> Decimal:
 
 
 def _shipping_price_bands(weight_kg: Decimal) -> list[tuple[Decimal, Decimal, Decimal]]:
-    """Choose tariffs by actual weight; round only the variable weight charge.
-
-    For example, 410g is billed as 500g but still uses the under-500g
-    base fee. Rounding must not promote the parcel into a higher tariff
-    or reject an actual weight below the 30kg upper limit.
-    """
-    billable_weight = (
-        weight_kg * Decimal("10")
-    ).to_integral_value(rounding=ROUND_CEILING) / Decimal("10")
-    bands: list[tuple[Decimal, Decimal, Decimal]] = []
-    if weight_kg < Decimal("0.5"):
-        bands.append((Decimal("0"), Decimal("135"), Decimal("3.37") + billable_weight * Decimal("28.10")))
-    elif weight_kg < Decimal("30"):
-        bands.append((Decimal("0"), Decimal("135"), Decimal("24.71") + billable_weight * Decimal("28.10")))
-
-    if weight_kg < Decimal("2"):
-        bands.append((Decimal("135"), Decimal("635"), Decimal("17.97") + billable_weight * Decimal("28.10")))
-    elif weight_kg < Decimal("30"):
-        bands.append((Decimal("135"), Decimal("635"), Decimal("40.44") + billable_weight * Decimal("28.10")))
-
-    if weight_kg < Decimal("5"):
-        bands.append((Decimal("635"), Decimal("22525"), Decimal("25.83") + billable_weight * Decimal("19.10")))
-    elif weight_kg < Decimal("30"):
-        bands.append((Decimal("635"), Decimal("22525"), Decimal("64.00") + billable_weight * Decimal("25.80")))
+    """RUB value bands: first lower bound inclusive, subsequent ones exclusive."""
+    weight = weight_kg.quantize(Decimal("0.000000000001"), rounding=ROUND_HALF_UP)
+    if weight > 30 or weight_kg <= 0:
+        return []
+    bands = []
+    for lower, upper, limit, light_base, light_rate, heavy_base, heavy_rate in (
+        (1, 1500, "0.5", "3.37", "28.10", "25.83", "19.10"),
+        (1500, 7000, "2", "17.97", "28.10", "40.44", "28.10"),
+        (7000, 250000, "5", "24.71", "28.10", "69.64", "25.80"),
+    ):
+        base, rate = (light_base, light_rate) if weight <= Decimal(limit) else (heavy_base, heavy_rate)
+        shipping = (Decimal(base) + weight * Decimal(rate)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        bands.append((Decimal(lower), Decimal(upper), shipping))
     return bands
 
 
-def calculate_shipping(price, weight_kg) -> Decimal:
+def calculate_shipping(price, weight_kg, exchange_rate="12.5") -> Decimal:
     sale_price = _pricing_decimal(price, "售价")
     weight = _pricing_decimal(weight_kg, "实际重量")
+    rate = _pricing_decimal(exchange_rate, "汇率")
+    value = (sale_price * rate).quantize(Decimal("0.0000000001"), rounding=ROUND_HALF_UP)
     for minimum, maximum, shipping in _shipping_price_bands(weight):
-        if minimum <= sale_price < maximum:
+        if (value >= minimum if minimum == 1 else value > minimum) and value <= maximum:
             return shipping
     raise ValueError("售价或实际重量超出运费公式支持区间")
 
@@ -142,6 +133,7 @@ def calculate_price_breakdown(
     *, sales_commission_discount_percent=0,
     advertising_percent=ADVERTISING_RATE * Decimal("100"),
     cargo_loss_percent=CARGO_LOSS_RATE * Decimal("100"),
+    exchange_rate="12.5",
 ) -> RoiPricingBreakdown:
     sale_price = _pricing_decimal(price, "售价")
     purchase = _pricing_decimal(purchase_cost, "采购成本")
@@ -155,7 +147,7 @@ def calculate_price_breakdown(
         raise ValueError("减免后的销售佣金必须大于 0%")
     advertising_rate = _expense_rate(advertising_percent, "广告费率")
     cargo_loss_rate = _expense_rate(cargo_loss_percent, "货损率")
-    shipping = calculate_shipping(sale_price, weight)
+    shipping = calculate_shipping(sale_price, weight, exchange_rate)
     invested = purchase + label
     sales_commission = sale_price * sales_commission_rate
     logistics_commission = sale_price * LOGISTICS_COMMISSION_RATE
@@ -184,11 +176,13 @@ def calculate_roi_price(
     *, sales_commission_percent, sales_commission_discount_percent=0,
     advertising_percent=ADVERTISING_RATE * Decimal("100"),
     cargo_loss_percent=CARGO_LOSS_RATE * Decimal("100"), minimum_sale_price=0,
+    exchange_rate="12.5",
 ) -> RoiPricingBreakdown:
     purchase = _pricing_decimal(purchase_cost, "采购成本")
     label = _pricing_decimal(label_fee, "贴单费", allow_zero=True)
     target_roi = _pricing_decimal(target_roi_percent, "目标 ROI", allow_zero=True) / Decimal("100")
     weight = _pricing_decimal(weight_kg, "实际重量")
+    exchange = _pricing_decimal(exchange_rate, "汇率")
     minimum_price = _pricing_decimal(minimum_sale_price, "最低售价", allow_zero=True)
     invested = purchase + label
     manual_commission_rate = _sales_commission_rate(sales_commission_percent)
@@ -211,10 +205,13 @@ def calculate_roi_price(
             + (Decimal("1") + cargo_loss_rate) * (invested + shipping)
         ) / retained_rate
         price = max(
-            Decimal("1"), minimum, minimum_price,
+            Decimal("1"),
+            (minimum / exchange).to_integral_value(rounding=ROUND_CEILING) if minimum == 1 else (minimum / exchange).to_integral_value(rounding=ROUND_FLOOR) + 1,
+            minimum_price.to_integral_value(rounding=ROUND_CEILING),
             required_price.to_integral_value(rounding=ROUND_CEILING),
         )
-        if price >= maximum:
+        value = (price * exchange).quantize(Decimal("0.0000000001"), rounding=ROUND_HALF_UP)
+        if value > maximum or (value <= minimum if minimum != 1 else value < minimum):
             continue
         sales_commission = price * sales_commission_rate
         logistics_commission = price * LOGISTICS_COMMISSION_RATE
