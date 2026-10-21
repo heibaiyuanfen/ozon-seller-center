@@ -223,7 +223,7 @@ class ProductLedgerTests(unittest.TestCase):
         }
         item = {
             "offer_id": "SKU-1", "name": "Товар", "price": "100", "old_price": "0",
-            "currency_code": "RUB", "weight": 900, "depth": 60, "width": 110,
+            "currency_code": "RUB", "weight_unit": "g", "dimension_unit": "mm", "weight": 900, "depth": 60, "width": 110,
             "height": 240, "description_category_id": 10, "type_id": 20,
         }
         pricing = {

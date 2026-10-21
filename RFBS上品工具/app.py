@@ -375,6 +375,8 @@ class RfbsListingApp(WbUiMixin):
             values = copy.deepcopy(base)
             values.update(listing_mode="local", source_url="", amazon_source="", amazon_generate_main="0", unique_main_image="0",
                 supplier_1688_url=product["url"], local_image_paths=list(variant.get("images") or []))
+            if variant.get('id'):
+                values.update(backup_product_id="supplier-" + product['id'], backup_variant_id="supplier-" + variant['id'])
             for key in ("offer_id", "purchase_cost", "weight", "depth", "width", "height"):
                 values[key] = str(variant.get(key) or "")
             values["net_weight"] = values["weight"]
@@ -6711,10 +6713,24 @@ class RfbsListingApp(WbUiMixin):
         local_listing = self._local_listing_enabled({
             "listing_mode": input_value("listing_mode", "follow"),
         })
+        def normalized_measurement(key):
+            factor = ({"g": 1, "kg": 1000} if key == "weight" else {"mm": 1, "cm": 10, "m": 1000}).get(
+                item.get("weight_unit" if key == "weight" else "dimension_unit"))
+            raw = item.get(key)
+            if factor is None or raw is None:
+                return None
+            number = Decimal(str(raw)) * factor
+            return int(number) if number == int(number) else float(number)
         return {
             "platform": "Ozon",
             "shop_name": inputs.get("ozon_shop_name") or shop.get("name") or "",
             "shop_config_id": inputs.get("ozon_shop_id") or shop.get("id") or "",
+            "product_group_id": inputs.get("product_group_id") or "",
+            "base_offer_id": inputs.get("base_offer_id") or "",
+            "backup_product_id": inputs.get("backup_product_id") or "",
+            "backup_variant_id": inputs.get("backup_variant_id") or "",
+            "dimension_unit": "mm" if item.get("dimension_unit") in {"mm", "cm", "m"} else "",
+            "weight_unit": "g" if item.get("weight_unit") in {"g", "kg"} else "",
             "listing_mode": "本地新品" if local_listing else "跟卖",
             "offer_id": item.get("offer_id"),
             "supplier_1688_url": input_value("supplier_1688_url"),
@@ -6744,10 +6760,10 @@ class RfbsListingApp(WbUiMixin):
             "cargo_loss": pricing_result.get("cargo_loss"),
             "profit": pricing_result.get("profit"),
             "net_weight_g": input_value("net_weight"),
-            "gross_weight_g": item.get("weight"),
-            "depth_mm": item.get("depth"),
-            "width_mm": item.get("width"),
-            "height_mm": item.get("height"),
+            "gross_weight_g": normalized_measurement("weight"),
+            "depth_mm": normalized_measurement("depth"),
+            "width_mm": normalized_measurement("width"),
+            "height_mm": normalized_measurement("height"),
             "category_display": input_value("category_display"),
             "category_id": item.get("description_category_id"),
             "type_id": item.get("type_id"),
@@ -6877,6 +6893,10 @@ class RfbsListingApp(WbUiMixin):
                 f"台账：{ledger_result['path']}\n请继续在卖家后台检查审核和可售状态。",
             ))
         return output
+
+    def _backup_to_product_library(self, output, item, pricing, task_id, warehouse_id, stock, definitions, job=None):
+        """Compatibility no-op: product-library integration is disabled."""
+        return None
 
 
 def launch():
