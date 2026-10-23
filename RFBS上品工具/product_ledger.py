@@ -91,6 +91,12 @@ LEDGER_COLUMNS = (
     LedgerColumn("import_task_id", "Ozon导入任务ID", 18),
     LedgerColumn("status", "状态", 22),
     LedgerColumn("shop_config_id", "店铺配置ID", 18),
+    LedgerColumn("product_group_id", "任务产品组ID", 28),
+    LedgerColumn("base_offer_id", "原始货号", 24),
+    LedgerColumn("backup_product_id", "备份产品ID", 34),
+    LedgerColumn("backup_variant_id", "备份规格ID", 34),
+    LedgerColumn("dimension_unit", "台账尺寸单位", 14),
+    LedgerColumn("weight_unit", "台账重量单位", 14),
 )
 
 

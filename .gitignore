@@ -34,3 +34,6 @@ diagnostic-backup/
 .supabase/
 # Local product materials and downloaded installers; keep them on this computer.
 /新建文件夹/
+RFBS上品工具/erp-backup/
+RFBS上品工具/erp-backup-settings.json
+RFBS上品工具/erp-ledger/
