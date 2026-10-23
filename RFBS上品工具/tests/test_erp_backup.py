@@ -31,7 +31,9 @@ class BackupTests(unittest.TestCase):
         app._save_auto_jobs = Mock()
         app._product_ledger_record = Mock(side_effect=OSError('simulated backup disk error'))
         job = {'id': 'task'}
-        with patch('app.load_json', return_value={'enabled': True, 'base_url': 'http://localhost:8788'}):
+        def settings(path, default=None):
+            return {'enabled': True, 'base_url': 'http://localhost:8788'} if Path(path).name == 'erp-backup-settings.json' else {}
+        with patch('app.load_json', side_effect=settings):
             app._backup_to_product_library('unused.json', {}, {}, 1, 1, 1, [], job)
         self.assertEqual(job, {'id': 'task'})
         app._product_ledger_record.assert_not_called()

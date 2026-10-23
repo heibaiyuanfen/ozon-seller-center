@@ -37,7 +37,6 @@ from product_ledger import upsert_product_ledger, listing_snapshot
 from shop_variants import DuplicateMainImageError, ShopVariantRegistry, shop_offer_id, variant_directory
 from runtime_paths import APP_DATA_DIR
 from wb_ui import WbUiMixin
-from mercadolibre.ui import MercadoLibrePanel
 from amazon_source import download_amazon_images, scrape_amazon_product
 from seerfar_import import MAPPING_FIELDS, load_seerfar_workbook, mapping_payload, merge_product_mappings
 from pool_review_ui import PoolReviewMixin
@@ -87,7 +86,7 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
 
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Ozon / Wildberries / 美客多 上品工具")
+        self.root.title("Ozon / Wildberries 上品工具")
         self.root.geometry("1180x900")
         self.root.minsize(980, 760)
         self.log_queue: queue.Queue[str] = queue.Queue()
@@ -321,16 +320,6 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         self.notebook.add(self.attributes_tab, text="5. 类目与属性")
         self.notebook.add(self.execute_tab, text="6. 草稿与上架")
         self.notebook.add(self.wb_tab, text="7. WB 上架")
-        self.mercadolibre_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.mercadolibre_tab, text="8. 美客多（独立）")
-        try:
-            self.mercadolibre_panel = MercadoLibrePanel(self.mercadolibre_tab, APP_DIR / "mercadolibre-data")
-            self.mercadolibre_panel.pack(fill=tk.BOTH, expand=True)
-        except (OSError, ValueError) as error:
-            # An unreadable isolated workspace must not prevent other platforms opening.
-            for child in self.mercadolibre_tab.winfo_children():
-                child.destroy()
-            ttk.Label(self.mercadolibre_tab, text=f"美客多工作区暂不可用：{error}", wraplength=800).pack(padx=20, pady=20)
         self._build_product_pool()
         self._build_workbench()
         self._build_settings()
@@ -340,7 +329,7 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         self._build_wb()
         from supplier_ui import SupplierPanel
         self.supplier_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.supplier_tab, text="9. 1688 图片与变体")
+        self.notebook.add(self.supplier_tab, text="8. 1688 图片与变体")
         try:
             self.supplier_panel = SupplierPanel(self.supplier_tab, APP_DIR / "supplier-1688", self._apply_supplier_variant, self._enqueue_supplier_variants, self._supplier_image_service)
             self.supplier_panel.pack(fill=tk.BOTH, expand=True)
@@ -1109,11 +1098,13 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         self._entry(tab, "AccessKey ID", "oss_access_key_id", 21)
         self._entry(tab, "AccessKey Secret", "oss_access_key_secret", 21, 2, show="*")
         self._entry(tab, "对象前缀", "oss_object_prefix", 22, default="rfbs-listing")
+        from catalog_upload_ui import build_catalog_settings
+        build_catalog_settings(self, tab, APP_DIR).grid(row=23, column=0, columnspan=4, sticky="ew", pady=6)
         config_actions = ttk.Frame(tab)
-        config_actions.grid(row=23, column=0, columnspan=4, sticky="e", padx=5, pady=12)
+        config_actions.grid(row=24, column=0, columnspan=4, sticky="e", padx=5, pady=6)
         ttk.Button(config_actions, text="导出配置", command=self._export_config).pack(side=tk.LEFT, padx=5)
         ttk.Button(config_actions, text="保存全部配置", command=self._save_config).pack(side=tk.LEFT, padx=5)
-        ttk.Label(tab, text="配置保存在本机 config.json；请勿上传或分享密钥文件。", foreground="#8a5a00").grid(row=24, column=0, columnspan=4, sticky="w")
+        ttk.Label(tab, text="配置保存在本机；请勿上传或分享密钥文件。", foreground="#8a5a00").grid(row=25, column=0, columnspan=4, sticky="w")
 
     def _build_product(self):
         tab = self.product_tab
@@ -1742,6 +1733,8 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
 
     def _save_config(self):
         try:
+            from catalog_upload_ui import save_catalog_settings
+            save_catalog_settings(APP_DIR, self.catalog_url_var.get())
             selected_shop_id = self.vars.get("ozon_shop_id").get().strip() if self.vars.get("ozon_shop_id") else ""
             has_shop_fields = any(
                 self.vars[key].get().strip()
@@ -6958,6 +6951,8 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
             "product_ledger": ledger_result,
         })
         self._log("提交记录已保存：" + str(output))
+        # Separate data delivery from OSS image upload and platform/ledger success.
+        self._backup_to_product_library(output, item, pricing_result, task_id, warehouse_id, stock, definitions, job_record)
         if notify:
             self.root.after(0, lambda: messagebox.showinfo(
                 "提交完成",
@@ -6967,8 +6962,15 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         return output
 
     def _backup_to_product_library(self, output, item, pricing, task_id, warehouse_id, stock, definitions, job=None):
-        """Compatibility no-op: product-library integration is disabled."""
-        return None
+        try:
+            if not load_json(APP_DIR / 'shared-catalog-settings.json', {}).get('enabled'):
+                return
+            from catalog_upload import upload_after_listing
+            row = self._product_ledger_record(item, pricing, task_id, warehouse_id, stock, job_record=job)
+            images = list(dict.fromkeys(url for url in [item.get('primary_image'), *(item.get('images') or [])] if url))
+            upload_after_listing(APP_DIR, row, images, self._log)
+        except Exception:
+            self._log('共享资料上传未完成；本地台账与上架结果保留，可稍后从台账补传')
 
 
 def launch():

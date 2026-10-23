@@ -8,7 +8,8 @@ from erp_backup import BackupOutbox, ErpBackupClient, base_url
 
 
 def open_connection(app, root):
-    messagebox.showinfo('产品库上传已停用', '当前仅执行上架、库存和本地台账流程。', parent=app.root)
+    from catalog_upload_ui import open_catalog_connection
+    open_catalog_connection(app, root)
 
 
 def _archived_open_connection(app, root):

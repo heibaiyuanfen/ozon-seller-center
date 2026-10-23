@@ -1,0 +1,33 @@
+{
+  "target": "https://erp.wxzwxz.xyz",
+  "product": {
+    "source": "ozon-seller-center",
+    "external_id": "e895e4f7068ed1b2f98ee4e5df0d08b554dbb3f02b2d0fa96b43e850a87e7997",
+    "sku": "400",
+    "name": "Полотенце для ванной 70x140 см, голубой, 1 шт",
+    "variants": [
+      {
+        "sku": "400",
+        "specification": "400",
+        "purchase_price_cny": 50.0,
+        "package_length_mm": 230.0,
+        "package_width_mm": 160.0,
+        "package_height_mm": 50.0,
+        "weight_grams": 270.0,
+        "images": [
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-FFG/2026-10-24/400/400%E4%B8%BB%E5%9B%BE.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-FFG/2026-10-24/400/%E9%99%84%E5%9B%BE%281%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-FFG/2026-10-24/400/%E9%99%84%E5%9B%BE%282%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-FFG/2026-10-24/400/%E9%99%84%E5%9B%BE%283%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-FFG/2026-10-24/400/%E9%99%84%E5%9B%BE%284%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-FFG/2026-10-24/400/%E9%99%84%E5%9B%BE%285%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-FFG/2026-10-24/400/%E9%99%84%E5%9B%BE%286%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-FFG/2026-10-24/400/%E9%99%84%E5%9B%BE%287%29.jpg"
+        ]
+      }
+    ],
+    "source_url": "https://www.ozon.ru/product/5284129727",
+    "description_category_id": 17028730,
+    "type_id": 970865037
+  }
+}
