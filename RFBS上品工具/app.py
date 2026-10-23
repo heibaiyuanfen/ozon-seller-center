@@ -33,13 +33,14 @@ from services import (
     WatermarkService,
     build_ozon_main_image_prompt, build_ozon_poster_text_lines,
 )
-from product_ledger import upsert_product_ledger
+from product_ledger import upsert_product_ledger, listing_snapshot
 from shop_variants import DuplicateMainImageError, ShopVariantRegistry, shop_offer_id, variant_directory
 from runtime_paths import APP_DATA_DIR
 from wb_ui import WbUiMixin
 from mercadolibre.ui import MercadoLibrePanel
 from amazon_source import download_amazon_images, scrape_amazon_product
 from seerfar_import import MAPPING_FIELDS, load_seerfar_workbook, mapping_payload, merge_product_mappings
+from pool_review_ui import PoolReviewMixin
 
 
 APP_DIR = APP_DATA_DIR
@@ -78,7 +79,7 @@ class AutoJobCancelled(RuntimeError):
     """Cooperative stop requested for one queued automatic listing job."""
 
 
-class RfbsListingApp(WbUiMixin):
+class RfbsListingApp(PoolReviewMixin, WbUiMixin):
     WB_CONFIG_PATH = CONFIG_PATH
     WB_JOB_PATH = WB_JOB_PATH
     OUTPUT_DIR = OUTPUT_DIR
@@ -447,17 +448,29 @@ class RfbsListingApp(WbUiMixin):
         )
         sort_combo.pack(side=tk.LEFT, padx=6)
         sort_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_product_pool_tree())
+        ttk.Label(filters, text="自动筛选结果").pack(side=tk.LEFT, padx=(12, 4))
+        self.pool_review_filter_var = tk.StringVar(value="全部")
+        review_filter = ttk.Combobox(filters, textvariable=self.pool_review_filter_var,
+            values=("全部", "通过", "待补充", "淘汰"), state="readonly", width=12)
+        review_filter.pack(side=tk.LEFT)
+        review_filter.bind("<<ComboboxSelected>>", lambda _event: self._refresh_product_pool_tree())
+        review_controls = ttk.Frame(controls)
+        review_controls.grid(row=2, column=0, columnspan=6, sticky="w", pady=8)
+        ttk.Button(review_controls, text="选品规则", command=self._edit_pool_rules).pack(side=tk.LEFT, padx=4)
+        ttk.Button(review_controls, text="确认选中销量周期", command=self._confirm_pool_sales_period).pack(side=tk.LEFT, padx=4)
+        ttk.Button(review_controls, text="批量审核 / 反向核价 / 入队", command=self._review_pool_selection).pack(side=tk.LEFT, padx=4)
+        ttk.Label(review_controls, text="Ctrl/Shift 多选；先在自动工作台选择目标店铺、类目、仓库及图片模式").pack(side=tk.LEFT, padx=8)
         frame = ttk.Frame(tab)
         frame.grid(row=3, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
         columns = ("no", "title", "sku", "market_price", "sales", "fulfillment", "supplier", "offer", "price", "status")
-        self.product_pool_tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+        self.product_pool_tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="extended")
         for key, title, width in (
             ("no", "序号", 55), ("title", "商品标题", 310), ("sku", "Ozon SKU", 105),
             ("market_price", "市场价", 75), ("sales", "销量", 75), ("fulfillment", "履约", 65),
             ("supplier", "采购链接", 120), ("offer", "货号", 115), ("price", "上架价", 75),
-            ("status", "匹配状态", 85),
+            ("status", "审核状态", 85),
         ):
             self.product_pool_tree.heading(key, text=title)
             self.product_pool_tree.column(key, width=width, stretch=key in {"title", "supplier"})
@@ -465,6 +478,9 @@ class RfbsListingApp(WbUiMixin):
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=self.product_pool_tree.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.product_pool_tree.configure(yscrollcommand=scrollbar.set)
+        horizontal = ttk.Scrollbar(frame, orient="horizontal", command=self.product_pool_tree.xview)
+        horizontal.grid(row=1, column=0, sticky="ew")
+        self.product_pool_tree.configure(xscrollcommand=horizontal.set)
         self.product_pool_tree.bind("<Double-1>", lambda _event: self._edit_selected_pool_product())
 
     @staticmethod
@@ -511,19 +527,25 @@ class RfbsListingApp(WbUiMixin):
             )).casefold()
             if query and query not in haystack:
                 continue
-            is_ready = self._pool_product_ready(item)
+            from pool_review import evaluate_product
+            fbp = self._job_var("fbp_pricing", "0").get() == "1"
+            result = evaluate_product(item, self._pool_rules(), fbp=fbp,
+                exchange_rate=self._job_var("shipping_exchange_rate", "12.5").get())
+            result_filter = self.pool_review_filter_var.get()
+            if result_filter != "全部" and result["status"] != result_filter:
+                continue
             shown += 1
             self.product_pool_tree.insert("", tk.END, iid=str(index), values=(
                 item.get("no") or item.get("excel_row"), item.get("title"), item.get("sku"),
                 item.get("market_price"), item.get("sales"), item.get("fulfillment"),
                 item.get("supplier_1688_url"), item.get("offer_id"), item.get("price"),
-                "已匹配" if is_ready else "待补充",
+                result["status"],
             ))
         for item_id in selected:
             if tree.exists(item_id):
                 tree.selection_add(item_id)
         self.product_pool_status_var.set(
-            f"显示 {shown} / 共 {len(self.product_pool_products)} 个；已匹配 {sum(self._pool_product_ready(x) for x in self.product_pool_products)} 个"
+            f"显示 {shown} / 共 {len(self.product_pool_products)} 个；双击编辑，审核表查看原因"
             if self.product_pool_products else "尚未导入 Excel"
         )
 
@@ -549,11 +571,15 @@ class RfbsListingApp(WbUiMixin):
         saved = load_json(PRODUCT_POOL_PATH, {})
         mappings = saved.get("mappings", {}) if isinstance(saved, dict) else {}
         products = merge_product_mappings(load_seerfar_workbook(path), mappings)
+        # A new export can change price, weight and sales window. Never reuse approval blindly.
+        for item in products:
+            item["economics_confirmed"] = "0"
+            item["sales_period_days"] = ""
         self.product_pool_products = products
         self.product_pool_source_path = str(Path(path).resolve())
         self._save_product_pool()
         self._ui_call(self._refresh_product_pool_tree)
-        self._log(f"Seerfar Excel 已导入 {len(products)} 个产品：{path}")
+        self._log(f"Seerfar Excel 已导入 {len(products)} 个产品：{path}；请重新确认销量周期、成交价与成本参数")
 
     def _save_product_pool(self):
         atomic_write_json(PRODUCT_POOL_PATH, {
@@ -562,6 +588,7 @@ class RfbsListingApp(WbUiMixin):
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "products": self.product_pool_products,
             "mappings": mapping_payload(self.product_pool_products),
+            "rules": self._pool_rules(),
         })
 
     def _load_product_pool(self):
@@ -571,6 +598,12 @@ class RfbsListingApp(WbUiMixin):
             products = []
         self.product_pool_products = [dict(item) for item in products if isinstance(item, dict)]
         self.product_pool_source_path = str(payload.get("source_path") or "") if isinstance(payload, dict) else ""
+        from pool_review import validate_rules
+        try:
+            self.product_pool_rules = validate_rules(payload.get("rules", {}) if isinstance(payload, dict) else {})
+        except (ValueError, TypeError):
+            self.product_pool_rules = {}
+            self._log("选品规则无效，已使用默认规则；请打开选品规则重新确认")
         self._refresh_product_pool_tree()
 
     def _edit_selected_pool_product(self):
@@ -582,40 +615,65 @@ class RfbsListingApp(WbUiMixin):
         window.geometry("720x720")
         window.transient(self.root)
         window.grab_set()
-        ttk.Label(window, text=str(item.get("title") or ""), font=("Microsoft YaHei UI", 11, "bold"), wraplength=670).grid(
+        canvas = tk.Canvas(window, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(window, orient="vertical", command=canvas.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        form = ttk.Frame(canvas)
+        form_id = canvas.create_window((0, 0), window=form, anchor="nw")
+        form.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(form_id, width=event.width))
+        ttk.Label(form, text=str(item.get("title") or ""), font=("Microsoft YaHei UI", 11, "bold"), wraplength=650).grid(
             row=0, column=0, columnspan=2, sticky="w", padx=14, pady=(14, 4),
         )
         ttk.Label(
-            window,
+            form,
             text=f"Ozon SKU：{item.get('sku') or '-'}    市场价：{item.get('market_price') or '-'} RUB    销量：{item.get('sales') or '-'}",
             foreground="#555",
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 10))
         labels = {
             "supplier_1688_url": "采购链接", "offer_id": "货号（Offer ID）", "model_name": "型号名称",
-            "purchase_cost": "采购成本", "price": "上架售价（RUB）", "old_price": "折扣前价格",
+            "purchase_cost": "采购到手成本（含国内运费分摊）", "price": "原上架价（批审使用预计成交价）", "old_price": "折扣前价格",
             "target_roi": "目标 ROI（%）", "sales_commission_percent": "标准佣金（%）",
             "net_weight": "商品净重（克）", "weight": "包装毛重（克）",
             "depth": "包装长度（毫米）", "width": "包装宽度（毫米）", "height": "包装高度（毫米）",
             "stock": "可售库存", "notes": "备注",
+            "review_price": "预计成交价（空＝市场参考价）",
+            "sales_period_days": "销量统计周期（天，须核对导出范围）",
+            "supplier_sku": "采购规格/SKU（颜色、尺寸、件数等）",
+            "supplier_confirmed": "已核对同款规格、库存与交期",
+            "economics_confirmed": "已核对成交价、到手成本及包装参数",
+            "label_fee": "贴单费（空＝选品规则默认值）",
+            "advertising_percent": "广告费率 %（空＝规则默认值）",
+            "cargo_loss_percent": "货损率 %（空＝规则默认值）",
+            "review_confirmed_at": "上次人工确认时间（保存时更新）",
         }
         defaults = {
             "target_roi": "60", "old_price": "0", "sales_commission_percent": "",
-            "depth": "100", "width": "100", "height": "100", "stock": "1",
+            "stock": "1",
         }
         variables = {}
         for row, field in enumerate(MAPPING_FIELDS, start=2):
-            ttk.Label(window, text=labels[field]).grid(row=row, column=0, sticky="w", padx=14, pady=4)
+            ttk.Label(form, text=labels[field]).grid(row=row, column=0, sticky="w", padx=14, pady=4)
             variable = tk.StringVar(value=str(item.get(field) or defaults.get(field, "")))
             variables[field] = variable
-            ttk.Entry(window, textvariable=variable, width=68).grid(row=row, column=1, sticky="ew", padx=(0, 14), pady=4)
-        window.columnconfigure(1, weight=1)
+            if field in {"supplier_confirmed", "economics_confirmed"}:
+                ttk.Checkbutton(form, variable=variable, onvalue="1", offvalue="0").grid(row=row, column=1, sticky="w", padx=8)
+            elif field == "review_confirmed_at":
+                ttk.Label(form, textvariable=variable).grid(row=row, column=1, sticky="w")
+            else:
+                ttk.Entry(form, textvariable=variable, width=42).grid(row=row, column=1, sticky="ew", padx=(0, 14), pady=4)
+        form.columnconfigure(1, weight=1)
         def save():
             for field, variable in variables.items():
                 item[field] = variable.get().strip()
+            item["review_confirmed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            item.pop("review_result", None)
             self._save_product_pool()
             self._refresh_product_pool_tree()
             window.destroy()
-        buttons = ttk.Frame(window)
+        buttons = ttk.Frame(form)
         buttons.grid(row=2 + len(MAPPING_FIELDS), column=0, columnspan=2, sticky="e", padx=14, pady=14)
         ttk.Button(buttons, text="保存", command=save).pack(side=tk.LEFT, padx=5)
         ttk.Button(buttons, text="取消", command=window.destroy).pack(side=tk.LEFT, padx=5)
@@ -6707,12 +6765,26 @@ class RfbsListingApp(WbUiMixin):
             return variable.get().strip() if variable is not None else default
 
         shop = self._ozon_shop_for_api(str(inputs.get("ozon_shop_id") or "") or None)
+        try:
+            ledger_content = self._generated_content()
+        except (KeyError, AttributeError):
+            state = (job_record or {}).get("state") or {}
+            fields = state.get("fields") or {}
+            ledger_content = {"title_ru": item.get("name", ""),
+                "description_ru": state.get("description", ""), "tags_ru": fields.get("tags", "")}
         fbp_pricing = self._fbp_pricing_enabled({"fbp_pricing": input_value("fbp_pricing")})
         local_listing = self._local_listing_enabled({
             "listing_mode": input_value("listing_mode", "follow"),
         })
         return {
             "platform": "Ozon",
+            "description": ledger_content.get("description_ru", ""),
+            "tags": format_ozon_hashtags(ledger_content.get("tags_ru", [])),
+            "attributes_json": json.dumps(item.get("attributes", []), ensure_ascii=False),
+            "complex_attributes_json": json.dumps(item.get("complex_attributes", []), ensure_ascii=False),
+            "shipping_exchange_rate": input_value("shipping_exchange_rate", "12.5"),
+            "snapshot_version": "1",
+            "listing_snapshot_json": listing_snapshot(item, ledger_content),
             "shop_name": inputs.get("ozon_shop_name") or shop.get("name") or "",
             "shop_config_id": inputs.get("ozon_shop_id") or shop.get("id") or "",
             "listing_mode": "本地新品" if local_listing else "跟卖",

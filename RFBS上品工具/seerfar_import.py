@@ -139,6 +139,9 @@ MAPPING_FIELDS = (
     "supplier_1688_url", "offer_id", "model_name", "purchase_cost", "price",
     "old_price", "target_roi", "sales_commission_percent", "net_weight", "weight",
     "depth", "width", "height", "stock", "notes",
+    "review_price", "sales_period_days", "supplier_sku", "supplier_confirmed",
+    "economics_confirmed", "label_fee", "advertising_percent", "cargo_loss_percent",
+    "review_confirmed_at",
 )
 
 

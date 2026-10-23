@@ -4,6 +4,7 @@ import os
 import time
 import threading
 import uuid
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,6 +30,12 @@ class LedgerColumn:
 
 
 LEDGER_COLUMNS = (
+    LedgerColumn("description", "商品描述", 50),
+    LedgerColumn("tags", "搜索标签", 45),
+    LedgerColumn("attributes_json", "普通属性JSON", 50),
+    LedgerColumn("complex_attributes_json", "组合属性JSON", 50),
+    LedgerColumn("shipping_exchange_rate", "上架核价汇率", 16),
+    LedgerColumn("snapshot_version", "上架快照版本", 14),
     LedgerColumn("updated_at", "更新时间", 20, "datetime"),
     LedgerColumn("platform", "平台", 14),
     LedgerColumn("shop_name", "上品店铺", 18),
@@ -88,6 +95,51 @@ LEDGER_COLUMNS = (
 
 
 _LEDGER_LOCK = threading.RLock()
+
+
+def listing_snapshot(item, content):
+    """Only submission data; never credentials, image files, URLs or local image paths."""
+    excluded = {"images", "primary_image", "images360", "color_image", "image", "pictures"}
+    def clean(value):
+        if isinstance(value, dict):
+            return {key: clean(part) for key, part in value.items() if key not in excluded}
+        if isinstance(value, list):
+            return [clean(part) for part in value]
+        return value
+    return json.dumps({"version": 1, "item": clean(item), "content": content}, ensure_ascii=False)
+
+
+def write_snapshot(workbook, record):
+    raw = record.get("listing_snapshot_json")
+    if not raw:
+        return
+    name = "上架信息快照"
+    sheet = workbook[name] if name in workbook.sheetnames else workbook.create_sheet(name)
+    if sheet.cell(1, 1).value is None:
+        sheet.append(["平台", "店铺配置ID", "货号", "分片序号", "JSON内容"])
+    identity = tuple(str(record.get(key) or "") for key in ("platform", "shop_config_id", "offer_id"))
+    for row in range(sheet.max_row, 1, -1):
+        if tuple(str(sheet.cell(row, col).value or "") for col in (1, 2, 3)) == identity:
+            sheet.delete_rows(row)
+    # Stay below Excel's 32767-character cell limit without losing full attributes/content.
+    for index, start in enumerate(range(0, len(raw), 12000), start=1):
+        sheet.append([*identity, index, raw[start:start + 12000]])
+        sheet.cell(sheet.max_row, 5).data_type = "s"
+    sheet.freeze_panes = "A2"
+    sheet.column_dimensions["E"].width = 90
+
+
+def read_listing_snapshot(path, platform, shop_config_id, offer_id):
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        if "上架信息快照" not in workbook.sheetnames:
+            return None
+        identity = tuple(map(str, (platform, shop_config_id, offer_id)))
+        parts = [(int(row[3]), row[4]) for row in workbook["上架信息快照"].iter_rows(min_row=2, values_only=True)
+                 if tuple(str(value or "") for value in row[:3]) == identity]
+        return json.loads("".join(part for _, part in sorted(parts))) if parts else None
+    finally:
+        workbook.close()
 _HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 _HEADER_FONT = Font(name="Microsoft YaHei", size=10, bold=True, color="FFFFFF")
 _BODY_FONT = Font(name="Microsoft YaHei", size=10, color="1F2933")
@@ -340,6 +392,7 @@ def upsert_product_ledger(path: str | Path, record: dict) -> dict:
 
         _style_worksheet(worksheet, header_by_title, target_row)
         _ensure_table(worksheet, header_by_title)
+        write_snapshot(workbook, record)
         _save_atomic(workbook, ledger_path)
 
     return {
