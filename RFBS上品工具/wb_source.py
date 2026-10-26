@@ -248,7 +248,7 @@ def scrape_wb_source_browser(
             except Exception as error:
                 last_error = error
         if context is None:
-            raise RuntimeError(f"无法启动 Google Chrome；请确认本机已安装谷歌浏览器：{last_error}")
+            raise RuntimeError(f"无法启动采集浏览器；请检查完整安装目录中的内置浏览器及安全软件拦截记录：{last_error}")
         try:
             browser_page = context.pages[0] if context.pages else context.new_page()
             try:

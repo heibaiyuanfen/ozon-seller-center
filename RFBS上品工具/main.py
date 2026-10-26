@@ -55,6 +55,24 @@ def prepare_packaged_tk_runtime() -> None:
 prepare_packaged_tk_runtime()
 
 from tls_runtime import configure_tls_ca_bundle
+if "--tls-diagnostic" in sys.argv:
+    import json
+    import ssl
+    import certifi
+    import traceback
+    diagnostic = {"executable": sys.executable, "root": getattr(sys, "_MEIPASS", ""),
+                  "filesystem_encoding": sys.getfilesystemencoding(), "ca": certifi.where()}
+    for name, operation in (
+        ("ca_exists", lambda: Path(certifi.where()).is_file()),
+        ("context", lambda: str(ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT))),
+        ("configure", configure_tls_ca_bundle),
+    ):
+        try:
+            diagnostic[name] = operation()
+        except Exception:
+            diagnostic[name] = traceback.format_exc()
+    Path(tempfile.gettempdir(), "rfbs-tls-diagnostic.json").write_text(json.dumps(diagnostic), encoding="ascii")
+    raise SystemExit(0)
 configure_tls_ca_bundle()
 
 import tkinter as tk  # noqa: E402
@@ -69,6 +87,14 @@ def packaging_smoke_test() -> int:
     from playwright.sync_api import sync_playwright
     from browser_runtime import bundled_edge_executable
     from product_ledger import SHEET_TITLE, upsert_product_ledger
+    from product_ledger import image_link_fields
+    from catalog_upload import product_data
+
+    image_probe = image_link_fields('https://images.example.com/main.jpg', ['https://images.example.com/extra.jpg'])
+    catalog_probe = product_data(dict(shop_config_id='smoke', offer_id='SMOKE', title='Smoke',
+                                      supplier_1688_url='测试', **image_probe), 'smoke')
+    if len(catalog_probe['variants'][0]['images']) != 2 or 'source_url' in catalog_probe:
+        raise RuntimeError('打包后的台账图片链接或可选来源链接校验失败')
 
     APP_DIR.mkdir(parents=True, exist_ok=True)
     probe = APP_DIR / ".packaging-smoke-test.tmp"
@@ -87,6 +113,8 @@ def packaging_smoke_test() -> int:
     if getattr(sys, "frozen", False) and browser_executable is None:
         raise RuntimeError("安装包中缺少 Edge 浏览器运行文件")
     if browser_executable is not None:
+        from packaging_checks import check_browser_images
+        check_browser_images()
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(
                 executable_path=str(browser_executable), headless=True
@@ -101,6 +129,13 @@ def packaging_smoke_test() -> int:
     root = tk.Tk()
     root.withdraw()
     app = RfbsListingApp(root)
+    saved_definitions = app.attribute_definitions
+    app.attribute_definitions = [{'id': 111, 'name': 'Material'}]
+    try:
+        if app._enforce_manual_model_name([], []):
+            raise RuntimeError('未提供合并型号的类目不应强制添加型号属性')
+    finally:
+        app.attribute_definitions = saved_definitions
     if not hasattr(app, "listing_workers_spinbox") or not 1 <= app._listing_concurrency() <= 5:
         raise RuntimeError("上架并发数设置未正常创建")
     manual_pricing = app._job_price_breakdown({
@@ -131,11 +166,8 @@ def packaging_smoke_test() -> int:
         raise RuntimeError("打包后的本地新品模式未能启用图片选择按钮")
     if not hasattr(app, "wb_product_tabs") or app.wb_product_tabs.index("end") != 3:
         raise RuntimeError("打包后的 WB 上架界面未完整创建")
-    ml_panel = getattr(app, "mercadolibre_panel", None)
-    if ml_panel is None or ml_panel.tabs.index("end") != 6:
-        raise RuntimeError("打包后的美客多独立工作区未完整创建")
-    if not ml_panel.publish_button.instate(["disabled"]):
-        raise RuntimeError("美客多框架阶段真实发布必须保持禁用")
+    if not hasattr(app, "supplier_panel"):
+        raise RuntimeError("打包后的 1688 图片与变体工作区未完整创建")
     app.wb_job = {}
     app.vars["wb_listing_mode"].set("follow")
     app._wb_on_listing_mode_changed()

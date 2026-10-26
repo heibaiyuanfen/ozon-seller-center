@@ -1,0 +1,24 @@
+{
+  "target": "https://erp.wxzwxz.xyz",
+  "product": {
+    "source": "ozon-seller-center",
+    "external_id": "1d64f1486be229c2279f3198ec8a99ce8e0bd204fc690aabddb1aa6e83f6a8a1",
+    "sku": "AUTO-20261010-77C0C257FA434B71-6EBB6570EC449C2F",
+    "name": "Инструментальный пояс-органайзер с магнитными держателями, 26 карманов",
+    "variants": [
+      {
+        "sku": "AUTO-20261010-77C0C257FA434B71-6EBB6570EC449C2F",
+        "specification": "AUTO-20261010-77C0C257FA434B71",
+        "purchase_price_cny": 19.0,
+        "package_length_mm": 200.0,
+        "package_width_mm": 200.0,
+        "package_height_mm": 200.0,
+        "weight_grams": 400.0,
+        "images": []
+      }
+    ],
+    "source_url": "https://www.ozon.ru/product/5239425375",
+    "description_category_id": 88791474,
+    "type_id": 95500
+  }
+}

@@ -223,6 +223,8 @@ class ProductLedgerTests(unittest.TestCase):
         }
         item = {
             "offer_id": "SKU-1", "name": "Товар", "price": "100", "old_price": "0",
+            "primary_image": "https://images.example.com/main.jpg",
+            "images": ["https://images.example.com/extra.jpg"],
             "currency_code": "RUB", "weight_unit": "g", "dimension_unit": "mm", "weight": 900, "depth": 60, "width": 110,
             "height": 240, "description_category_id": 10, "type_id": 20,
         }
@@ -235,6 +237,8 @@ class ProductLedgerTests(unittest.TestCase):
         record = app._product_ledger_record(item, pricing, 99, 1001, 3, job_record=job)
 
         self.assertEqual(record["offer_id"], "SKU-1")
+        self.assertEqual(record["primary_image_url"], "https://images.example.com/main.jpg")
+        self.assertIn("https://images.example.com/extra.jpg", record["image_urls_json"])
         self.assertEqual(record["listing_mode"], "本地新品")
         self.assertEqual(record["supplier_1688_url"], "https://detail.1688.com/offer/456.html")
         self.assertEqual(record["ozon_source_url"], "https://www.ozon.ru/product/123/")

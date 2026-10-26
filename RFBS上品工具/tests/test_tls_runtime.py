@@ -13,6 +13,17 @@ from tls_runtime import configure_tls_ca_bundle
 
 
 class TlsRuntimeTests(unittest.TestCase):
+    def test_unicode_bundle_path_can_use_windows_short_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory) / "bundle.pem"
+            bundle.write_bytes(b"fixture")
+            with patch("tls_runtime.certifi.where", return_value=str(bundle)), \
+                 patch("tls_runtime._valid_ca_path", side_effect=lambda path: path == "C:/SHORT/ca.pem"), \
+                 patch("tls_runtime._short_path", return_value="C:/SHORT/ca.pem"), \
+                 patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(configure_tls_ca_bundle(), "C:/SHORT/ca.pem")
+                self.assertEqual(os.environ["SSL_CERT_FILE"], "C:/SHORT/ca.pem")
+
     def test_invalid_old_directory_environment_uses_valid_ca(self):
         with patch.dict(os.environ, {"REQUESTS_CA_BUNDLE": "missing/old/cacert.pem", "CURL_CA_BUNDLE": "missing/cert.pem", "SSL_CERT_FILE": "missing/ssl.pem"}):
             bundle = configure_tls_ca_bundle()

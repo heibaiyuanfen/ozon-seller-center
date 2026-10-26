@@ -1,0 +1,24 @@
+{
+  "target": "https://erp.wxzwxz.xyz",
+  "product": {
+    "source": "ozon-seller-center",
+    "external_id": "e9b9b04c648dccb10906304c9d576d855dc2a382c1e151efed9e756db65ccb22",
+    "sku": "AUTO-20261010-88C3A0C23FD64C5B-82FFE89BAD877215",
+    "name": "Сумка для строительных инструментов на пояс, 26 отделений, красная, 30×30 см",
+    "variants": [
+      {
+        "sku": "AUTO-20261010-88C3A0C23FD64C5B-82FFE89BAD877215",
+        "specification": "AUTO-20261010-88C3A0C23FD64C5B",
+        "purchase_price_cny": 19.0,
+        "package_length_mm": 200.0,
+        "package_width_mm": 200.0,
+        "package_height_mm": 200.0,
+        "weight_grams": 400.0,
+        "images": []
+      }
+    ],
+    "source_url": "https://www.ozon.ru/product/5010040401",
+    "description_category_id": 88791474,
+    "type_id": 95500
+  }
+}

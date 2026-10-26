@@ -25,7 +25,11 @@ class BrowserRuntimeTests(unittest.TestCase):
             ):
                 self.assertEqual(bundled_chromium_executable(), executable.resolve())
                 candidates = chromium_launch_candidates()
-            self.assertEqual(candidates, [{"channel": "chrome"}])
+            self.assertEqual(candidates[-2:], [{"channel": "chrome"}, {"channel": "msedge"}])
+
+    def test_packaged_browser_does_not_require_system_installation(self):
+        with patch("browser_runtime.bundled_edge_executable", return_value=Path("bundle/msedge.exe")):
+            self.assertEqual(chromium_launch_candidates()[0], {"executable_path": str(Path("bundle/msedge.exe"))})
 
 
 if __name__ == "__main__":

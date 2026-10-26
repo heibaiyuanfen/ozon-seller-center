@@ -1,0 +1,35 @@
+{
+  "target": "https://erp.wxzwxz.xyz",
+  "product": {
+    "source": "ozon-seller-center",
+    "external_id": "e2490856ff639baffc25a3c275c38d3f11558460bc76c3bcf6061aa6db231737",
+    "sku": "AUTO-20261024-BF474A26E8C1442A",
+    "name": "Кистевой эспандер, подпружиненный эспандер для кистей, усиленная пружина для пальцев, регулировка нагрузки от 5 до 200 кг",
+    "variants": [
+      {
+        "sku": "AUTO-20261024-BF474A26E8C1442A",
+        "specification": "AUTO-20261024-BF474A26E8C1442A",
+        "purchase_price_cny": 50.0,
+        "package_length_mm": 200.0,
+        "package_width_mm": 200.0,
+        "package_height_mm": 200.0,
+        "weight_grams": 149.0,
+        "images": [
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-10-24/AUTO-20261024-BF474A26E8C1442A/AUTO-20261024-BF474A26E8C1442A%E4%B8%BB%E5%9B%BE.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-10-24/AUTO-20261024-BF474A26E8C1442A/%E9%99%84%E5%9B%BE%281%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-10-24/AUTO-20261024-BF474A26E8C1442A/%E9%99%84%E5%9B%BE%282%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-10-24/AUTO-20261024-BF474A26E8C1442A/%E9%99%84%E5%9B%BE%283%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-10-24/AUTO-20261024-BF474A26E8C1442A/%E9%99%84%E5%9B%BE%284%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-10-24/AUTO-20261024-BF474A26E8C1442A/%E9%99%84%E5%9B%BE%285%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-10-24/AUTO-20261024-BF474A26E8C1442A/%E9%99%84%E5%9B%BE%286%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-10-24/AUTO-20261024-BF474A26E8C1442A/%E9%99%84%E5%9B%BE%287%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-10-24/AUTO-20261024-BF474A26E8C1442A/%E9%99%84%E5%9B%BE%288%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-10-24/AUTO-20261024-BF474A26E8C1442A/%E9%99%84%E5%9B%BE%289%29.jpg"
+        ]
+      }
+    ],
+    "source_url": "https://www.ozon.ru/product/espander-kistevoy-pruzhinnyy-dlya-ruk-trenazher-hvata-i-paltsev-s-regulirovkoy-nagruzki-ot-5-do-4825956785/",
+    "description_category_id": 17028709,
+    "type_id": 115947437
+  }
+}

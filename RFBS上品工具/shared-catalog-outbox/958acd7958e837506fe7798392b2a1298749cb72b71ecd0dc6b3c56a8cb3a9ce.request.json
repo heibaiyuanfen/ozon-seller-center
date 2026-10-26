@@ -1,0 +1,24 @@
+{
+  "target": "https://erp.wxzwxz.xyz",
+  "product": {
+    "source": "ozon-seller-center",
+    "external_id": "18a6a20238d87820d4ce552ea7c861defd534b91946726397ed865dc54df8317",
+    "sku": "AUTO-0831-1",
+    "name": "Сумка для строительных инструментов из оксфорда с карманами и ручкой",
+    "variants": [
+      {
+        "sku": "AUTO-0831-1",
+        "specification": "AUTO-0831-1",
+        "purchase_price_cny": 11.0,
+        "package_length_mm": 310.0,
+        "package_width_mm": 270.0,
+        "package_height_mm": 180.0,
+        "weight_grams": 350.0,
+        "images": []
+      }
+    ],
+    "source_url": "https://www.ozon.ru/product/2848920317/",
+    "description_category_id": 88791474,
+    "type_id": 95500
+  }
+}

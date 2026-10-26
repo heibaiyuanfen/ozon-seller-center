@@ -1,6 +1,8 @@
 ﻿param(
     [switch]$SkipTests,
     [switch]$SkipPackagedSmokeTest,
+    [switch]$SkipArchive,
+    [string]$PythonExecutable = "",
     [string]$OutputSubdirectory = ""
 )
 
@@ -50,6 +52,22 @@ if (Test-Path -LiteralPath $BundledPythonPath) {
     $PythonPath = $BundledPythonPath
     $env:TCL_LIBRARY = Join-Path $BundledPythonRoot "tcl\tcl8.6"
     $env:TK_LIBRARY = Join-Path $BundledPythonRoot "tcl\tk8.6"
+}
+$OfficialPythonRoot = Join-Path $env:LOCALAPPDATA "Programs\Python\Python312"
+$OfficialPythonPath = Join-Path $OfficialPythonRoot "python.exe"
+if (Test-Path -LiteralPath $OfficialPythonPath) {
+    $PythonPath = $OfficialPythonPath
+    $env:TCL_LIBRARY = Join-Path $OfficialPythonRoot "tcl\tcl8.6"
+    $env:TK_LIBRARY = Join-Path $OfficialPythonRoot "tcl\tk8.6"
+}
+if ($PythonExecutable) {
+    if (-not (Test-Path -LiteralPath $PythonExecutable)) {
+        throw "Requested Python executable was not found."
+    }
+    $PythonPath = $PythonExecutable
+    $PythonRoot = Split-Path -Parent $PythonPath
+    $env:TCL_LIBRARY = Join-Path $PythonRoot "tcl\tcl8.6"
+    $env:TK_LIBRARY = Join-Path $PythonRoot "tcl\tk8.6"
 }
 if (-not $PythonPath) {
     throw "Python was not found. Install Python 3.10 or newer first."
@@ -111,20 +129,33 @@ if (-not $SkipPackagedSmokeTest) {
     # finishes. Wait explicitly so compression cannot race the smoke test and
     # lock the executable or bundled libraries underneath it.
     Start-Sleep -Seconds 2
-    $SmokeProcess = Start-Process -FilePath $ExecutablePath `
-        -ArgumentList "--packaging-smoke-test" `
-        -WindowStyle Hidden `
-        -PassThru
+    $SmokeProcess = New-Object System.Diagnostics.Process
+    $SmokeProcess.StartInfo.FileName = $ExecutablePath
+    $SmokeProcess.StartInfo.Arguments = "--packaging-smoke-test"
+    $SmokeProcess.StartInfo.UseShellExecute = $false
+    $SmokeProcess.StartInfo.CreateNoWindow = $true
+    $SmokeProcess.StartInfo.RedirectStandardError = $true
+    $SmokeProcess.StartInfo.RedirectStandardOutput = $true
+    [void]$SmokeProcess.Start()
+    $SmokeError = $SmokeProcess.StandardError.ReadToEndAsync()
+    $SmokeOutput = $SmokeProcess.StandardOutput.ReadToEndAsync()
     if (-not $SmokeProcess.WaitForExit(180000)) {
-        Stop-Process -Id $SmokeProcess.Id -Force -ErrorAction SilentlyContinue
+        $SmokeProcess.Kill()
         throw "打包后的程序自检超时。"
     }
+    $SmokeError.Result | Set-Content -LiteralPath (Join-Path $BuildRoot "smoke-error.log") -Encoding UTF8
     if ($SmokeProcess.ExitCode -ne 0) {
+        Write-Host $SmokeError.Result
         throw "打包后的程序自检失败。"
     }
+    $SmokeProcess.Dispose()
     Start-Sleep -Milliseconds 500
 }
 
+if ($SkipArchive) {
+    Write-Host "EXE: $ExecutablePath"
+    exit 0
+}
 $ArchiveCreated = $false
 for ($ArchiveAttempt = 1; $ArchiveAttempt -le 5; $ArchiveAttempt++) {
     if (Test-Path -LiteralPath $ArchivePath) {

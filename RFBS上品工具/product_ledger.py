@@ -5,6 +5,8 @@ import time
 import threading
 import uuid
 import json
+import shutil
+from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -97,10 +99,95 @@ LEDGER_COLUMNS = (
     LedgerColumn("backup_variant_id", "备份规格ID", 34),
     LedgerColumn("dimension_unit", "台账尺寸单位", 14),
     LedgerColumn("weight_unit", "台账重量单位", 14),
+    LedgerColumn("primary_image_url", "主图链接", 50, "link"),
+    LedgerColumn("additional_image_urls", "附图链接", 60),
+    LedgerColumn("image_urls_json", "全部图片链接JSON", 65),
 )
 
 
 _LEDGER_LOCK = threading.RLock()
+
+
+def image_link_fields(primary=None, images=()):
+    values = [primary, *images]
+    urls = list(dict.fromkeys(
+        value.strip() for value in values
+        if isinstance(value, str) and value.strip().startswith(('https://', 'http://'))
+    ))
+    return dict(primary_image_url=urls[0] if urls else '',
+                additional_image_urls='\n'.join(urls[1:]),
+                image_urls_json=json.dumps(urls, ensure_ascii=False))
+
+
+def ledger_image_urls(row):
+    raw = row.get('image_urls_json') or '[]'
+    values = json.loads(raw) if isinstance(raw, str) else raw
+    if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+        raise ValueError('全部图片链接JSON必须是字符串数组')
+    additional = str(row.get('additional_image_urls') or '').splitlines()
+    return list(dict.fromkeys(value.strip() for value in
+                [row.get('primary_image_url') or '', *values, *additional] if value.strip()))
+
+
+def backfill_ledger_image_links(path, submission_dir):
+    """Fill missing image cells only from an unambiguous successful submission."""
+    path, submission_dir = Path(path).resolve(), Path(submission_dir)
+    updated = 0
+    backup = ''
+    with _LEDGER_LOCK, _process_file_lock(path):
+        workbook, sheet, _ = _load_or_create_workbook(path)
+        try:
+            headers = _ensure_headers(sheet)
+            rows = [(index, {column.key: sheet.cell(index, headers[column.title]).value
+                             for column in LEDGER_COLUMNS}) for index in range(2, sheet.max_row + 1)]
+            owners = defaultdict(set)
+            for _, row in rows:
+                if str(row.get('platform') or '').lower() == 'ozon':
+                    owners[(str(row.get('offer_id') or ''), str(row.get('import_task_id') or ''))].add(
+                        str(row.get('shop_config_id') or ''))
+            first_updated = None
+            for index, row in rows:
+                if str(row.get('platform') or '').lower() != 'ozon' or ledger_image_urls(row):
+                    continue
+                offer, task, shop = (str(row.get(key) or '') for key in
+                                     ('offer_id', 'import_task_id', 'shop_config_id'))
+                if not offer or not task or not shop or '/' in offer or '\\' in offer:
+                    continue
+                source = submission_dir / ('submitted-' + offer + '.json')
+                try:
+                    document = json.loads(source.read_text(encoding='utf-8-sig'))
+                    item = document.get('item') or {}
+                    if not document.get('submitted') or item.get('offer_id') != offer or str(document.get('task_id') or '') != task:
+                        continue
+                    source_shop = str(document.get('shop_config_id') or '')
+                    if (source_shop and source_shop != shop) or (not source_shop and len(owners[(offer, task)]) != 1):
+                        continue
+                    entries = (document.get('import_result') or {}).get('result', {}).get('items', [])
+                    if not any(entry.get('offer_id') == offer and entry.get('status') == 'imported'
+                               and not entry.get('errors') for entry in entries):
+                        continue
+                    fields = image_link_fields(item.get('primary_image'), item.get('images') or [])
+                    if not fields['primary_image_url']:
+                        continue
+                except (OSError, ValueError, TypeError, AttributeError):
+                    continue
+                for key, value in fields.items():
+                    column = next(column for column in LEDGER_COLUMNS if column.key == key)
+                    sheet.cell(index, headers[column.title], value)
+                updated += 1
+                first_updated = first_updated or index
+            if updated:
+                directory = path.parent / '台账备份'
+                directory.mkdir(parents=True, exist_ok=True)
+                destination = directory / f'{path.stem}-补图前-{uuid.uuid4().hex[:12]}.xlsx'
+                shutil.copy2(path, destination)
+                backup = str(destination)
+                _style_worksheet(sheet, headers, first_updated)
+                _ensure_table(sheet, headers)
+                _save_atomic(workbook, path)
+        finally:
+            workbook.close()
+    return dict(updated=updated, backup=backup)
 
 
 def listing_snapshot(item, content):
@@ -393,6 +480,8 @@ def upsert_product_ledger(path: str | Path, record: dict) -> dict:
         values = dict(record)
         values["updated_at"] = values.get("updated_at") or datetime.now()
         for column in LEDGER_COLUMNS:
+            if column.key in {'primary_image_url', 'additional_image_urls', 'image_urls_json'} and column.key not in record:
+                continue
             cell = worksheet.cell(target_row, header_by_title[column.title])
             cell.value = _cell_value(column, values.get(column.key))
 

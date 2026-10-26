@@ -1,5 +1,6 @@
-param(
-    [switch]$SkipExeBuild
+﻿param(
+    [switch]$SkipExeBuild,
+    [string]$OutputSubdirectory = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,13 +16,25 @@ if (-not (Test-Path -LiteralPath $Iscc)) {
 }
 
 if (-not $SkipExeBuild) {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript
+    if ($OutputSubdirectory) {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript -OutputSubdirectory $OutputSubdirectory
+    } else {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $BuildScript
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "The application build failed."
     }
 }
 
-& $Iscc $InstallerScript
+if ($OutputSubdirectory) {
+    if ($OutputSubdirectory -notmatch '^[a-zA-Z0-9_-]+$') {
+        throw "OutputSubdirectory must be a simple directory name."
+    }
+    $ReleaseRoot = Join-Path $ProjectRoot ("发布\" + $OutputSubdirectory + "\Ozon_RFBS上品工具")
+    & $Iscc ("/DReleaseRoot=" + $ReleaseRoot) $InstallerScript
+} else {
+    & $Iscc $InstallerScript
+}
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup compilation failed."
 }

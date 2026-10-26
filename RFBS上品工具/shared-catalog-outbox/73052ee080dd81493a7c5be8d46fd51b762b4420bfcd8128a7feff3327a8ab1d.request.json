@@ -1,0 +1,24 @@
+{
+  "target": "https://erp.wxzwxz.xyz",
+  "product": {
+    "source": "ozon-seller-center",
+    "external_id": "41f8f2470311075503a41037612994532f8126590ef662ae4330fce2a39e95c8",
+    "sku": "1688-6D6B67B290E04D14",
+    "name": "Массажный мяч голубого цвета с округлыми выступами",
+    "variants": [
+      {
+        "sku": "1688-6D6B67B290E04D14",
+        "specification": "1688-M-DCC337E523DA4194",
+        "purchase_price_cny": 1.1,
+        "package_length_mm": 200.0,
+        "package_width_mm": 200.0,
+        "package_height_mm": 200.0,
+        "weight_grams": 100.0,
+        "images": []
+      }
+    ],
+    "source_url": "https://detail.1688.com/offer/1070526279194.html",
+    "description_category_id": 17028709,
+    "type_id": 115947437
+  }
+}

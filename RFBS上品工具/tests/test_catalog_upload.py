@@ -13,6 +13,36 @@ def row():
 
 
 class CatalogUploadTests(unittest.TestCase):
+    def test_placeholder_or_missing_supplier_url_does_not_block_upload(self):
+        for placeholder in ('测试', '', None, '   ', 'https://user:pass@example.com/a'):
+            with self.subTest(placeholder=placeholder):
+                data = {**row(), 'supplier_1688_url': placeholder}
+                result = product_data(data, 'instance')
+                self.assertNotIn('source_url', result)
+                self.assertEqual(data['supplier_1688_url'], placeholder)
+                self.assertEqual(result['sku'], 'A')
+
+    def test_source_falls_back_to_ozon_without_tracking_parameters(self):
+        data = {**row(), 'supplier_1688_url': '测试',
+                'ozon_source_url': 'https://www.ozon.ru/product/item-123/?sh=abc&abt_att=1#photos'}
+        self.assertEqual(product_data(data, 'instance')['source_url'],
+                         'https://www.ozon.ru/product/item-123/')
+        data['supplier_1688_url'] = 'http://detail.1688.com/offer/123.html?spm=tracking'
+        self.assertEqual(product_data(data, 'instance')['source_url'],
+                         'https://detail.1688.com/offer/123.html')
+        data.update(supplier_1688_url='', ozon_source_url='测试')
+        self.assertNotIn('source_url', product_data(data, 'instance'))
+
+    def test_placeholder_reaches_upload_and_receipt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            box = CatalogOutbox(folder)
+            path = box.prepare({**row(), 'supplier_1688_url': '测试'}, 'https://erp.example.com')
+            client = Mock()
+            client.connect.return_value = {'version': 1, 'authentication': 'none', 'upload_library': 'wff', 'initial_status': 'ready'}
+            client.add.return_value = {'product_id': 'a' * 32, 'created': True, 'replayed': False}
+            self.assertEqual(box.send(path, 'https://erp.example.com', lambda _: client)['product_id'], 'a' * 32)
+            self.assertNotIn('source_url', client.add.call_args.args[0])
+
     def test_whitelist_units_unknown_cost_and_no_private_snapshot(self):
         value = product_data(row(), 'instance', ['https://images.example.com/a.jpg'])
         self.assertEqual(value['variants'][0]['purchase_price_cny'], 12.5)
@@ -39,7 +69,7 @@ class CatalogUploadTests(unittest.TestCase):
             path = box.prepare(row(), 'https://erp.example.com')
             original = path.read_bytes()
             client = Mock()
-            client.connect.return_value = {'version': 1, 'authentication': 'none'}
+            client.connect.return_value = {'version': 1, 'authentication': 'none', 'upload_library': 'wff', 'initial_status': 'ready'}
             client.add.side_effect = RuntimeError('timeout')
             factory = Mock(return_value=client)
             with self.assertRaises(RuntimeError):

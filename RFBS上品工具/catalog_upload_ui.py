@@ -2,8 +2,9 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from core import load_json, atomic_write_json
-from shared_catalog_client import CatalogClient
+from shared_catalog_client import CatalogClient, CatalogRequestError
 from catalog_upload import CatalogOutbox
+from catalog_contract import validate_upload_capabilities
 
 
 def save_catalog_settings(root, address):
@@ -20,7 +21,7 @@ def save_catalog_settings(root, address):
 
 
 def build_catalog_settings(app, parent, root):
-    frame = ttk.LabelFrame(parent, text='共享资料自动上传', padding=6)
+    frame = ttk.LabelFrame(parent, text='wff 产品库自动上传', padding=6)
     frame.columnconfigure(1, weight=1)
     config = load_json(Path(root) / 'shared-catalog-settings.json', {})
     app.catalog_url_var = tk.StringVar(value=config.get('base_url', ''))
@@ -48,7 +49,7 @@ def open_upload_monitor(app, root):
     ttk.Label(window, textvariable=summary).pack(anchor='w', padx=10, pady=8)
     columns = ('sku', 'status', 'product_id', 'time', 'target', 'detail')
     tree = ttk.Treeview(window, columns=columns, show='headings')
-    for key, label in zip(columns, ('货号', '上传状态', '服务端产品ID', '更新时间（UTC）', '服务器', '说明')):
+    for key, label in zip(columns, ('货号', '上传状态', '服务端产品ID', '更新时间（含时区）', '服务器', '说明')):
         tree.heading(key, text=label)
         tree.column(key, width=170)
     tree.pack(fill=tk.BOTH, expand=True, padx=10)
@@ -82,7 +83,7 @@ def open_catalog_connection(app, root):
     settings_path = Path(root) / 'shared-catalog-settings.json'
     config = load_json(settings_path, {})
     window = tk.Toplevel(app.root)
-    window.title('共享产品库：资料上传（免登录 v1）')
+    window.title('wff 产品库：资料上传（免登录 v1）')
     url = tk.StringVar(value=config.get('base_url', ''))
     ttk.Label(window, text='服务 HTTPS 根地址').grid(row=0, column=0, padx=10, pady=10)
     ttk.Entry(window, textvariable=url, width=58).grid(row=0, column=1, padx=10)
@@ -104,9 +105,8 @@ def open_catalog_connection(app, root):
                 client = CatalogClient(target)
                 try:
                     capability = client.connect()
-                    if capability.get('version') != 1 or capability.get('authentication') != 'none':
-                        raise ValueError('不是免登录共享产品库 v1')
-                    app._log('共享产品库连接成功（免登录）')
+                    validate_upload_capabilities(capability)
+                    app._log('wff 产品库连接成功，服务器确认新增资料归属 wff / ready（不代表平台已发布）')
                 finally:
                     client.close()
             app._run(worker)
@@ -135,30 +135,54 @@ def open_catalog_connection(app, root):
         tree.pack(fill=tk.BOTH, expand=True)
         outbox = CatalogOutbox(root)
         from catalog_upload import product_data
-        for index, (_, row) in enumerate(rows):
+        def refresh():
+            tree.delete(*tree.get_children())
+            for index, (_, row) in enumerate(rows):
+                try:
+                    product = product_data(row, 'preview')
+                    count = len(product['variants'][0]['images'])
+                    status = f'可补传基础资料及 {count} 张图片链接' if count else '可补传基础资料；台账无图片链接'
+                except Exception as error:
+                    status = str(error)
+                tree.insert('', tk.END, iid=str(index), values=(row.get('shop_name'), row.get('offer_id'), row.get('title'), row.get('purchase_cost'), status))
+        refresh()
+        def backfill():
+            nonlocal rows
+            if not messagebox.askyesno('补齐历史图片链接', '按货号、店铺和导入任务核对本机成功提交记录，只补充台账缺失的图片链接。修改前自动备份台账。是否继续？', parent=preview):
+                return
             try:
-                product_data(row, 'preview')
-                status = '可补传基础资料（无图链接；不含文案属性）'
+                from product_ledger import backfill_ledger_image_links
+                result = backfill_ledger_image_links(path, Path(root) / '输出')
+                rows = [(number, row) for number, row in read_ledger(path) if str(row.get('platform') or '').lower() == 'ozon']
+                refresh()
+                messagebox.showinfo('补齐完成', f"已补齐 {result['updated']} 条；无法核实的记录保持原样。\n备份：{result['backup'] or '无修改，无需备份'}", parent=preview)
             except Exception as error:
-                status = str(error)
-            tree.insert('', tk.END, iid=str(index), values=(row.get('shop_name'), row.get('offer_id'), row.get('title'), row.get('purchase_cost'), status))
+                messagebox.showerror('补齐失败', str(error), parent=preview)
         def upload():
             chosen = [rows[int(key)] for key in tree.selection()]
-            if not chosen or not messagebox.askyesno('确认公开上传', f'上传选中的 {len(chosen)} 条基础资料（含采购成本）。文案、标签、属性保留本地，图片留空。不重新上架。是否继续？', parent=preview):
+            if not chosen or not messagebox.askyesno('确认公开上传', f'上传选中的 {len(chosen)} 条基础资料（含采购成本）及台账中的图片链接。文案、标签、属性保留本地。不重新上架。是否继续？', parent=preview):
                 return
             def worker():
                 success = failed = 0
-                for number, row in chosen:
+                for index, (number, row) in enumerate(chosen):
                     try:
                         request = outbox.prepare(row, target)
                         outbox.send(request, target)
                         success += 1
+                    except (CatalogRequestError, ValueError) as error:
+                        failed += 1
+                        app._log(f'台账第 {number} 行待补传：{error}')
+                        if isinstance(error, CatalogRequestError) and error.status_code == 429:
+                            failed += len(chosen) - index - 1
+                            app._log('服务器限流，本轮补传停止，后续行未发送；稍后原样补传')
+                            break
                     except Exception:
                         failed += 1
                         app._log(f'台账第 {number} 行待补传：请核对来源身份、字段或已入库冲突；原资料保留')
                 app._log(f'台账资料补传：成功 {success}，待处理 {failed}；没有重新执行上架')
             app._run(worker)
         ttk.Button(preview, text='上传选中基础资料', command=upload).pack(pady=10)
+        ttk.Button(preview, text='从成功提交记录补齐台账图片链接', command=backfill).pack(pady=5)
     actions = ttk.Frame(window)
     actions.grid(row=3, column=0, columnspan=2, pady=10)
     for label, action in (('保存设置', save), ('测试连接', connect), ('补传待传记录', retry), ('从台账补传基础资料', ledger)):

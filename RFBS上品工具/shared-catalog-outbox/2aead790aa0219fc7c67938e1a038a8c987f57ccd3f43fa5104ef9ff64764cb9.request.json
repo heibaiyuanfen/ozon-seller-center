@@ -1,0 +1,24 @@
+{
+  "target": "https://erp.wxzwxz.xyz",
+  "product": {
+    "source": "ozon-seller-center",
+    "external_id": "9f9fbc67d4f2ae37c999a42975d1106dbef613dfaf3fee1642f323c3c719063c",
+    "sku": "AUTO-20261010-16A6F947312044F7-447077FE15BF8AF4",
+    "name": "Пояс монтажника для инструментов, сумка с 6 отделениями, Оксфорд, синий",
+    "variants": [
+      {
+        "sku": "AUTO-20261010-16A6F947312044F7-447077FE15BF8AF4",
+        "specification": "AUTO-20261010-16A6F947312044F7",
+        "purchase_price_cny": 19.0,
+        "package_length_mm": 200.0,
+        "package_width_mm": 200.0,
+        "package_height_mm": 200.0,
+        "weight_grams": 400.0,
+        "images": []
+      }
+    ],
+    "source_url": "https://www.ozon.ru/product/5064317246",
+    "description_category_id": 88791474,
+    "type_id": 95500
+  }
+}

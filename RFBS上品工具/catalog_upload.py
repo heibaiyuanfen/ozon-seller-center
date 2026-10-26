@@ -2,33 +2,58 @@
 import hashlib
 import json
 import uuid
+import time
+import math
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 from core import atomic_write_json, load_json
 from erp_backup import outbox_lock
-from shared_catalog_client import CatalogClient
-
-
-def public_url(value):
-    value = str(value or '').strip()
-    parsed = urlsplit(value)
-    if value and (parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment):
-        raise ValueError('链接须为无认证信息、查询串及片段的公开 HTTPS 地址')
-    return value
+from shared_catalog_client import CatalogClient, CatalogRequestError
+from product_ledger import ledger_image_urls
+from catalog_contract import public_url, validate_product, validate_upload_capabilities, validate_receipt, valid_number, text_field
 
 
 def numeric(value, positive=False):
     if value is None or str(value).strip() == '':
         return None
-    n = Decimal(str(value))
+    try:
+        n = Decimal(str(value).strip())
+    except InvalidOperation:
+        raise ValueError('成本、尺寸和重量必须为数字；未知值请留空') from None
     if not n.is_finite() or n < 0 or (positive and n == 0):
         raise ValueError('成本须非负、尺寸重量须为正数；未知值请留空')
-    return float(n)
+    result = float(n)
+    valid_number(result, '成本/尺寸/重量', positive)
+    return result
 
 
-def product_data(row, namespace, images=()):
+def optional_source_url(*values):
+    """Keep placeholder text in the ledger, not in the optional URL field."""
+    for value in values:
+        raw = str(value or '').strip()
+        if not raw:
+            continue
+        try:
+            parsed = urlsplit(raw)
+            host = (parsed.hostname or '').lower()
+            if parsed.scheme not in {'https', 'http'} or not host or parsed.username or parsed.password:
+                continue
+            product_page = (
+                (host == '1688.com' or host.endswith('.1688.com')) and parsed.path.startswith('/offer/')
+            ) or (
+                (host == 'ozon.ru' or host.endswith('.ozon.ru')) and parsed.path.startswith('/product/')
+            )
+            if product_page:
+                raw = urlunsplit(('https', parsed.netloc, parsed.path, '', ''))
+            return public_url(raw)
+        except ValueError:
+            continue
+    return ''
+
+
+def product_data(row, namespace, images=None):
     shop, offer = str(row.get('shop_config_id') or '').strip(), str(row.get('offer_id') or '').strip()
     name = str(row.get('title') or '').strip()
     if not shop or not offer or not name:
@@ -36,23 +61,31 @@ def product_data(row, namespace, images=()):
     if len(offer) > 200 or len(name) > 600:
         raise ValueError('货号或标题超过接口长度限制')
     identity = hashlib.sha256(json.dumps([namespace, 'Ozon', shop, offer], ensure_ascii=False).encode()).hexdigest()
-    urls = list(dict.fromkeys(public_url(url) for url in images if url))
+    urls = list(dict.fromkeys(public_url(url) for url in (ledger_image_urls(row) if images is None else images) if url))
     if len(urls) > 15:
         raise ValueError('最多 15 张图片链接')
-    variant = dict(sku=offer, specification=str(row.get('model_name') or '')[:500],
+    variant = dict(sku=offer, specification=text_field(str(row.get('model_name') or ''), 'specification', 500),
         purchase_price_cny=numeric(row.get('purchase_cost')),
         package_length_mm=numeric(row.get('depth_mm'), True), package_width_mm=numeric(row.get('width_mm'), True),
         package_height_mm=numeric(row.get('height_mm'), True), weight_grams=numeric(row.get('gross_weight_g'), True), images=urls)
     product = dict(source='ozon-seller-center', external_id=identity, sku=offer, name=name, variants=[variant])
-    source = row.get('supplier_1688_url') or row.get('ozon_source_url')
+    for field, maximum in (('supplier', 120), ('color', 200), ('size', 200)):
+        if row.get(field) is not None:
+            value = text_field(str(row[field]), field, maximum)
+            (product if field == 'supplier' else variant)[field] = value
+    source = optional_source_url(row.get('supplier_1688_url'), row.get('ozon_source_url'))
     if source:
-        product['source_url'] = public_url(source)
+        product['source_url'] = source
     for key, field in (('description_category_id', 'category_id'), ('type_id', 'type_id')):
         if row.get(field) not in (None, ''):
-            value = int(str(row[field]))
-            if value <= 0:
+            try:
+                raw = Decimal(str(row[field]).strip())
+            except InvalidOperation:
+                raise ValueError('类目与类型 ID 须为正整数') from None
+            if not raw.is_finite() or raw <= 0 or raw != raw.to_integral_value():
                 raise ValueError('类目与类型 ID 须为正整数')
-            product[key] = value
+            product[key] = int(raw)
+    validate_product(product)
     return product
 
 
@@ -81,7 +114,7 @@ class CatalogOutbox:
                 pass
         return sorted(records, key=lambda row: row.get('time', ''), reverse=True)
 
-    def prepare(self, row, url, images=()):
+    def prepare(self, row, url, images=None):
         # Validate the endpoint without issuing a request.
         parsed = CatalogClient(url)
         target = parsed.base_url
@@ -90,6 +123,8 @@ class CatalogOutbox:
             namespace_path = self.root / 'namespace.json'
             state = load_json(namespace_path, {})
             if not state.get('namespace'):
+                if any(self.root.glob('*.request.json')) or any(self.root.glob('*.receipt.json')):
+                    raise ValueError('已有上传记录但实例命名空间缺失；请恢复 namespace.json，不能重新生成身份重传')
                 state = {'namespace': uuid.uuid4().hex}
                 atomic_write_json(namespace_path, state)
             product = product_data(row, state['namespace'], images)
@@ -109,6 +144,10 @@ class CatalogOutbox:
         receipt = Path(path).with_name(Path(path).name.replace('.request.json', '.receipt.json'))
         if receipt.is_file():
             return load_json(receipt, {})
+        cooldown = self.root / ('server-' + hashlib.sha256(record['target'].encode()).hexdigest() + '.cooldown.json')
+        retry_at = load_json(cooldown, {}).get('retry_at')
+        if isinstance(retry_at, (int, float)) and math.isfinite(retry_at) and retry_at > time.time():
+            raise CatalogRequestError(429, retry_at=retry_at)
         client = client_factory(record['target'])
         status_path = Path(path).with_name(Path(path).name.replace('.request.json', '.status.json'))
         def status(state, detail=''):
@@ -119,31 +158,43 @@ class CatalogOutbox:
         try:
             status('上传中 / 等待回执')
             capability = client.connect()
-            if capability.get('version') != 1 or capability.get('authentication') != 'none':
-                raise ValueError('服务器未提供免登录产品库 v1，请检查部署版本')
+            validate_upload_capabilities(capability)
+            validate_product(record['product'])
             response = client.add(record['product'])
-            product_id = response.get('product_id', '')
-            if len(product_id) != 32 or any(c not in '0123456789abcdef' for c in product_id):
-                raise ValueError('服务端返回无效产品ID，保留原请求供原样重试')
+            validate_receipt(response)
             atomic_write_json(receipt, response)
             status('上传成功')
             return response
+        except (CatalogRequestError, ValueError) as error:
+            if isinstance(error, CatalogRequestError) and error.status_code == 429 and error.retry_at is not None:
+                try:
+                    atomic_write_json(cooldown, {'retry_at': error.retry_at})
+                except OSError:
+                    pass
+            status('待补传 / 结果未确认', str(error))
+            raise
         except Exception:
-            status('待补传 / 结果未确认', '连接、协议或字段校验失败；保留原请求重试，勿重新上架')
+            status('待补传 / 结果未确认', '连接或协议校验失败；保留原请求重试，勿重新上架')
             raise
         finally:
             client.close()
 
     def retry(self, url, log):
         success = failed = 0
-        for path in self.root.glob('*.request.json'):
-            if load_json(path, {}).get('target') != url.rstrip('/'):
-                continue
-            if path.with_name(path.name.replace('.request.json', '.receipt.json')).is_file():
-                continue
+        paths = [path for path in self.root.glob('*.request.json')
+                 if load_json(path, {}).get('target') == url.rstrip('/')
+                 and not path.with_name(path.name.replace('.request.json', '.receipt.json')).is_file()]
+        for index, path in enumerate(paths):
             try:
                 self.send(path, url)
                 success += 1
+            except CatalogRequestError as error:
+                failed += 1
+                log(str(error))
+                if error.status_code == 429:
+                    failed += len(paths) - index - 1
+                    log('服务器限流，本轮补传停止；保留原请求，稍后再试')
+                    break
             except Exception:
                 failed += 1
                 log('共享产品资料仍待补传；原请求已保留，请检查连接或字段冲突')
@@ -160,13 +211,14 @@ def upload_after_listing(root, row, images, log):
         outbox = CatalogOutbox(root)
         path = outbox.prepare(row, config['base_url'], images)
         outbox.send(path, config['base_url'])
-        log('共享产品资料已入库；图片文件仍独立保存在 OSS')
-    except Exception:
+        log('产品资料已入库 wff 产品库；初始状态由服务器设为 ready，图片文件仍保存在 OSS')
+    except Exception as error:
         if path is None:
             try:
                 atomic_write_json(Path(root) / 'shared-catalog-outbox' / (uuid.uuid4().hex + '.failure.json'),
                     dict(target='', sku=str(row.get('offer_id', '')), status='资料准备失败', product_id='',
-                         time=datetime.now(timezone.utc).isoformat(), detail='请核对台账字段及服务配置后补传'))
+                         time=datetime.now(timezone.utc).isoformat(),
+                         detail=str(error) if isinstance(error, ValueError) else '请核对台账字段及服务配置后补传'))
             except Exception:
                 pass
         log('共享产品资料上传未完成；上架与本地台账已保留，可从台账补传，不要重新上架')

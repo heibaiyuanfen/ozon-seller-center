@@ -4,12 +4,48 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
+import time
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import requests
+from catalog_contract import validate_product, validate_upload_capabilities, validate_receipt
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
+
+
+class CatalogRequestError(RuntimeError):
+    def __init__(self, status_code=None, trace_id='', retry_at=None):
+        self.status_code, self.trace_id, self.retry_at = status_code, trace_id, retry_at
+        descriptions = {401: '核对专用接口路径和部署版本，无需登录',
+                        403: '核对请求方法、来源限制或网关', 404: '产品不存在、已归档或接口地址不正确',
+                        409: '来源身份内容冲突，人工核对原产品；不要更换来源身份',
+                        422: '字段、长度、链接或数值不符合数据模型',
+                        429: '请求受限，请等待 Retry-After 后原样重试'}
+        message = (f'产品库请求失败 HTTP {status_code}；' + descriptions.get(status_code, '结果未知，保留原请求稍后原样重试')
+                   if status_code is not None else '连接失败或结果未知；保留原始上传文件稍后原样重试')
+        if trace_id:
+            message += f'；trace_id={trace_id}'
+        super().__init__(message)
+
+
+def retry_after_timestamp(value):
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        delay = int(value)
+        return time.time() + max(0, delay)
+    except (ValueError, OverflowError):
+        try:
+            date = parsedate_to_datetime(value)
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=timezone.utc)
+            return max(time.time(), date.timestamp())
+        except (ValueError, TypeError, OverflowError):
+            return None
 
 
 class CatalogClient:
@@ -22,37 +58,57 @@ class CatalogClient:
         self.base_url = base_url
         self.session = session or requests.Session()
         self.timeout = (5, 20)  # Data delivery is optional; keep listing-worker waits bounded.
+        self._capability = None
 
     def call(self, method, path, **kwargs):
         try:
             response = self.session.request(method, self.base_url + path, timeout=self.timeout, allow_redirects=False, **kwargs)
         except requests.RequestException:
-            raise RuntimeError("连接失败或结果未知；请保留来源编号和原始上传文件，重试时不要修改") from None
+            raise CatalogRequestError() from None
         if response.status_code != 200:
             # Do not echo response bodies, URLs or headers that may contain secrets.
-            raise RuntimeError(f"产品库请求失败 HTTP {response.status_code}；401/403 请核对服务地址和部署版本，409 核对资料差异，422 检查字段")
-        value = response.json()
+            try:
+                body = response.json()
+                trace = body.get('trace_id', '') if isinstance(body, dict) else ''
+                trace = trace if isinstance(trace, str) and re.fullmatch(r'[a-zA-Z0-9._:-]{1,128}', trace) else ''
+            except (ValueError, TypeError):
+                trace = ''
+            raise CatalogRequestError(response.status_code, trace,
+                                      retry_after_timestamp(response.headers.get('Retry-After')) if response.status_code == 429 else None)
+        try:
+            value = response.json()
+        except ValueError:
+            raise RuntimeError('产品库返回了非JSON数据，保留原请求核对服务地址') from None
         if not isinstance(value, dict):
             raise RuntimeError("产品库返回格式错误")
         return value
 
     def connect(self):
-        return self.call("GET", "/api/v1/shared-catalog/v1/capabilities")
+        self._capability = self.call("GET", "/api/v1/shared-catalog/v1/capabilities")
+        return self._capability
 
     def login(self, username=None, password=None):
         """Compatibility alias; supplied credentials are ignored and never sent."""
         return self.connect()
 
     def search(self, search="", after_id="", limit=50):
+        if not isinstance(search, str) or len(search) > 200 or not isinstance(after_id, str) or len(after_id) > 32:
+            raise ValueError('搜索关键词最多200字符，游标最多32字符；换关键词时请清空游标')
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError('分页数量须为1–100的整数')
         return self.call("GET", "/api/v1/shared-catalog/v1/products", params=dict(search=search, after_id=after_id, limit=limit))
 
     def read(self, product_id):
-        if len(product_id) != 32 or any(c not in "0123456789abcdef" for c in product_id):
+        if not isinstance(product_id, str) or len(product_id) != 32 or any(c not in "0123456789abcdef" for c in product_id):
             raise ValueError("产品 ID 无效")
         return self.call("GET", "/api/v1/shared-catalog/v1/products/" + product_id)
 
     def add(self, product):
-        return self.call("POST", "/api/v1/shared-catalog/v1/products", json=product)
+        validate_product(product)
+        validate_upload_capabilities(self._capability or self.connect())
+        result = self.call("POST", "/api/v1/shared-catalog/v1/products", json=product)
+        validate_receipt(result)
+        return result
 
     def close(self):
         self.session.close()

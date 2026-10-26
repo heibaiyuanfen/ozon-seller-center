@@ -33,7 +33,7 @@ from services import (
     WatermarkService,
     build_ozon_main_image_prompt, build_ozon_poster_text_lines,
 )
-from product_ledger import upsert_product_ledger, listing_snapshot
+from product_ledger import upsert_product_ledger, listing_snapshot, image_link_fields
 from shop_variants import DuplicateMainImageError, ShopVariantRegistry, shop_offer_id, variant_directory
 from runtime_paths import APP_DATA_DIR
 from wb_ui import WbUiMixin
@@ -5216,6 +5216,9 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         value = normalize_attribute_name(name)
         return (
             value in {"название модели", "объединить на одной карточке", "model name"}
+            or value.startswith("название модели ")
+            or value.startswith("объединить на одной карточке ")
+            or value.startswith("model name ")
             or value.startswith("型号名称")
         )
 
@@ -5958,15 +5961,12 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         return True
 
     def _enforce_manual_model_name(self, attributes: list[dict], complex_attributes: list[dict]) -> bool:
+        definition = next((item for item in self.attribute_definitions if self._is_model_name_attribute(item)), None)
+        if not definition:
+            return False
         value = self.vars.get("model_name").get().strip() if self.vars.get("model_name") else ""
         if not value:
             raise ValueError("型号名称不能为空；请在自动工作台人工填写")
-        definition = next((item for item in self.attribute_definitions if self._is_model_name_attribute(item)), None)
-        if not definition:
-            raise ValueError(
-                "当前 Ozon 实时类目没有返回“型号名称（针对合并为一张商品卡片）”属性，"
-                "无法按型号合并变体；请检查所选类目"
-            )
         if int(definition.get("dictionary_id") or 0):
             raise ValueError("Ozon 将型号名称返回成了字典属性，程序不能提交任意文本；请刷新类目属性后重试")
         set_attribute_value(
@@ -6071,10 +6071,7 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         if not definitions:
             raise RuntimeError("指定类目没有返回实时属性，程序已停止")
         if not any(self._is_model_name_attribute(item) for item in definitions):
-            raise ValueError(
-                "当前 Ozon 实时类目没有“型号名称（针对合并为一张商品卡片）”属性，"
-                "请检查类目是否支持合并多变体"
-            )
+            self._log("当前类目未提供合并型号属性，继续按独立商品上架；型号保留在台账，不能保证合并商品卡片")
 
         content = self._generated_content()
         visual_analysis = self._ensure_vision_analysis() if (self.source_images or self.local_images) else {}
@@ -6318,10 +6315,7 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         if not definitions:
             raise RuntimeError("Ozon 没有返回该类目/类型的属性，请重新确认类目")
         if not any(self._is_model_name_attribute(item) for item in definitions):
-            raise ValueError(
-                "当前 Ozon 实时类目没有“型号名称（针对合并为一张商品卡片）”属性，"
-                "请检查类目是否支持合并多变体"
-            )
+            self._log("当前类目未提供合并型号属性，继续读取其他属性；型号仅保留在台账")
         required = [item for item in definitions if item.get("is_required")]
         attributes: list[dict] = []
         complex_attributes: list[dict] = []
@@ -6781,6 +6775,7 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
             return int(number) if number == int(number) else float(number)
         return {
             "platform": "Ozon",
+            **image_link_fields(item.get("primary_image"), item.get("images") or []),
             "description": ledger_content.get("description_ru", ""),
             "tags": format_ozon_hashtags(ledger_content.get("tags_ru", [])),
             "attributes_json": json.dumps(item.get("attributes", []), ensure_ascii=False),
@@ -6926,13 +6921,10 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
             if job_record is not None:
                 job_record["stock_completed"] = True
                 self._save_auto_jobs()
-        ledger_result = upsert_product_ledger(
-            PRODUCT_LEDGER_PATH,
-            self._product_ledger_record(
-                item, pricing_result, task_id, warehouse_id, stock,
-                job_record=job_record,
-            ),
+        ledger_record = self._product_ledger_record(
+            item, pricing_result, task_id, warehouse_id, stock, job_record=job_record,
         )
+        ledger_result = upsert_product_ledger(PRODUCT_LEDGER_PATH, ledger_record)
         if job_record is not None:
             job_record["ledger_completed"] = True
             job_record["ledger_path"] = ledger_result["path"]
@@ -6946,6 +6938,7 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         output = atomic_write_json(OUTPUT_DIR / f"submitted-{item['offer_id']}.json", {
             "source": export_reference(self.reference), "content": self._generated_content(),
             "item": item, "submitted": True,
+            "shop_config_id": ledger_record["shop_config_id"],
             "task_id": task_id, "import_result": result,
             "commission_pricing": pricing_result, "stock_result": stock_result,
             "product_ledger": ledger_result,

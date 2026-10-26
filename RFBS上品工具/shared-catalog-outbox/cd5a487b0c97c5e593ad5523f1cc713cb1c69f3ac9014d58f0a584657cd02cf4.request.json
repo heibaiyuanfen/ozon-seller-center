@@ -1,0 +1,24 @@
+{
+  "target": "https://erp.wxzwxz.xyz",
+  "product": {
+    "source": "ozon-seller-center",
+    "external_id": "90e20297358f176b396610bd287814502e08b50709bedcd4b6809fafa14831dd",
+    "sku": "1688-0344BCDAD8BE44AB",
+    "name": "Массажный мяч розовый с рельефной поверхностью",
+    "variants": [
+      {
+        "sku": "1688-0344BCDAD8BE44AB",
+        "specification": "1688-M-DCC337E523DA4194",
+        "purchase_price_cny": 1.1,
+        "package_length_mm": 200.0,
+        "package_width_mm": 200.0,
+        "package_height_mm": 200.0,
+        "weight_grams": 100.0,
+        "images": []
+      }
+    ],
+    "source_url": "https://detail.1688.com/offer/1070526279194.html",
+    "description_category_id": 17028709,
+    "type_id": 115947437
+  }
+}
