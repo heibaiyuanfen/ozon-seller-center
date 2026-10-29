@@ -1098,8 +1098,6 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         self._entry(tab, "AccessKey ID", "oss_access_key_id", 21)
         self._entry(tab, "AccessKey Secret", "oss_access_key_secret", 21, 2, show="*")
         self._entry(tab, "对象前缀", "oss_object_prefix", 22, default="rfbs-listing")
-        from catalog_upload_ui import build_catalog_settings
-        build_catalog_settings(self, tab, APP_DIR).grid(row=23, column=0, columnspan=4, sticky="ew", pady=6)
         config_actions = ttk.Frame(tab)
         config_actions.grid(row=24, column=0, columnspan=4, sticky="e", padx=5, pady=6)
         ttk.Button(config_actions, text="导出配置", command=self._export_config).pack(side=tk.LEFT, padx=5)
@@ -1282,6 +1280,9 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         ttk.Label(tab, text="运行日志").grid(row=4, column=0, sticky="w", padx=5)
         self.log_text = tk.Text(tab, state=tk.DISABLED, wrap="word")
         self.log_text.grid(row=5, column=0, columnspan=4, sticky="nsew", padx=5, pady=5)
+        from catalog_upload_ui import build_catalog_actions
+        self.catalog_actions_frame = build_catalog_actions(self, tab, APP_DIR)
+        self.catalog_actions_frame.grid(row=6, column=0, columnspan=4, sticky="ew", padx=5, pady=5)
 
     def _config(self):
         selected_shop_id = str(self.vars.get("ozon_shop_id").get() if self.vars.get("ozon_shop_id") else "").strip()
@@ -1733,8 +1734,6 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
 
     def _save_config(self):
         try:
-            from catalog_upload_ui import save_catalog_settings
-            save_catalog_settings(APP_DIR, self.catalog_url_var.get())
             selected_shop_id = self.vars.get("ozon_shop_id").get().strip() if self.vars.get("ozon_shop_id") else ""
             has_shop_fields = any(
                 self.vars[key].get().strip()
@@ -6850,6 +6849,27 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         self._run(self._submit)
 
     def _submit(self, notify=True, auto_progress=False, job_record=None):
+        item, _, _ = self._draft_data()
+        task_id = int((job_record or {}).get("task_id") or 0)
+        record = self._product_ledger_record(
+            item, {}, task_id, self.vars["warehouse_id"].get(),
+            self.vars["stock"].get(), job_record=job_record,
+        )
+        record["status"] = "已登记，待提交/审核"
+        upsert_product_ledger(PRODUCT_LEDGER_PATH, record)
+        self._log("产品已优先登记台账；后续提交失败也保留记录")
+        try:
+            return self._submit_registered(notify, auto_progress, job_record)
+        except Exception as error:
+            record["status"] = "上架未完成：" + str(error)[:2000]
+            record["import_task_id"] = (job_record or {}).get("task_id") or task_id
+            try:
+                upsert_product_ledger(PRODUCT_LEDGER_PATH, record)
+            except Exception:
+                self._log("失败状态回写失败，提交前台账记录仍保留，请检查台账是否被占用")
+            raise
+
+    def _submit_registered(self, notify=True, auto_progress=False, job_record=None):
         cancel_check = (
             (lambda: self._check_auto_job_cancelled(job_record))
             if job_record is not None else None
@@ -6886,17 +6906,15 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
             task_id, log_func=self._log, cancel_check=cancel_check,
         )
         result_items = (result or {}).get("result", {}).get("items", [])
-        errors = [entry for entry in result_items if entry.get("errors") or str(entry.get("status", "")).casefold() in {"failed", "error"}]
-        if errors:
-            raise RuntimeError("商品导入失败，未写入库存：" + json.dumps(errors, ensure_ascii=False))
-        statuses = {str(entry.get("status") or "").casefold() for entry in result_items}
-        if "imported" not in statuses:
-            raise RuntimeError(
-                f"Ozon 导入任务 {task_id} 尚未明确完成，程序不会提前写入库存。"
-                "请稍后按任务 ID 或 Offer ID 查询后再处理。"
-            )
+        confirmed_product = api.confirm_created_product(item["offer_id"], result)
+        diagnostics = [entry for entry in result_items if entry.get("errors")]
+        if diagnostics:
+            self._log("已确认商品存在，卡片问题单独保留，继续尝试定价和库存："
+                      + json.dumps(diagnostics, ensure_ascii=False))
         if job_record is not None:
             job_record["import_completed"] = True
+            job_record["card_diagnostics"] = diagnostics
+            job_record["confirmed_product_id"] = confirmed_product.get("id") or confirmed_product.get("product_id")
             self._save_auto_jobs()
         if cancel_check:
             cancel_check()
@@ -6924,6 +6942,8 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         ledger_record = self._product_ledger_record(
             item, pricing_result, task_id, warehouse_id, stock, job_record=job_record,
         )
+        if diagnostics:
+            ledger_record["status"] = "商品已创建，库存已写入；卡片需修复：" + json.dumps(diagnostics, ensure_ascii=False)[:2000]
         ledger_result = upsert_product_ledger(PRODUCT_LEDGER_PATH, ledger_record)
         if job_record is not None:
             job_record["ledger_completed"] = True
@@ -6956,8 +6976,6 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
 
     def _backup_to_product_library(self, output, item, pricing, task_id, warehouse_id, stock, definitions, job=None):
         try:
-            if not load_json(APP_DIR / 'shared-catalog-settings.json', {}).get('enabled'):
-                return
             from catalog_upload import upload_after_listing
             row = self._product_ledger_record(item, pricing, task_id, warehouse_id, stock, job_record=job)
             images = list(dict.fromkeys(url for url in [item.get('primary_image'), *(item.get('images') or [])] if url))

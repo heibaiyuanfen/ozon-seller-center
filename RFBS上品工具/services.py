@@ -203,7 +203,7 @@ class OzonApi:
                 continue
             items = last.get("result", {}).get("items", [])
             statuses = {str(item.get("status", "")).casefold() for item in items}
-            if any(item.get("errors") for item in items) or statuses & {"failed", "error", "imported"}:
+            if statuses & {"failed", "error", "imported"}:
                 return last
             if log_func and (attempt == 1 or attempt % 5 == 0):
                 rendered = "、".join(sorted(statuses)) or "等待 Ozon 返回状态"
@@ -212,6 +212,22 @@ class OzonApi:
         if last is None and last_error is not None:
             raise last_error
         return last
+
+    def confirm_created_product(self, offer_id, import_result):
+        """Import diagnostics do not alone establish whether a card exists."""
+        entries = (import_result or {}).get("result", {}).get("items", [])
+        matching = [entry for entry in entries
+                    if str(entry.get("offer_id") or "") == str(offer_id)]
+        if any(str(entry.get("status", "")).casefold() == "imported"
+               for entry in matching):
+            return matching[0]
+        data = self.post("/v3/product/info/list", {"offer_id": [str(offer_id)]})
+        for entry in data.get("items", []):
+            if (str(entry.get("offer_id") or "") == str(offer_id)
+                    and int(entry.get("id") or 0) > 0):
+                return entry
+        raise RuntimeError("尚未确认商品已创建，保留原任务，未写入库存："
+                           + json.dumps(entries, ensure_ascii=False))
 
     def update_price(
         self, offer_id: str, price, *, old_price="0", currency_code="RUB", min_price="0",

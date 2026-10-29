@@ -1,43 +1,16 @@
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-from core import load_json, atomic_write_json
 from shared_catalog_client import CatalogClient, CatalogRequestError
-from catalog_upload import CatalogOutbox
+from catalog_upload import CatalogOutbox, CATALOG_SERVER_URL
 from catalog_contract import validate_upload_capabilities
 
 
-def save_catalog_settings(root, address):
-    target = address.strip()
-    if target:
-        if not target.lower().startswith('https://'):
-            raise ValueError('共享资料服务地址必须使用 HTTPS')
-        client = CatalogClient(target)
-        target = client.base_url
-        client.close()
-    atomic_write_json(Path(root) / 'shared-catalog-settings.json',
-                      {'base_url': target, 'enabled': bool(target)})
-    return target
-
-
-def build_catalog_settings(app, parent, root):
-    frame = ttk.LabelFrame(parent, text='wff 产品库自动上传', padding=6)
-    frame.columnconfigure(1, weight=1)
-    config = load_json(Path(root) / 'shared-catalog-settings.json', {})
-    app.catalog_url_var = tk.StringVar(value=config.get('base_url', ''))
-    ttk.Label(frame, text='服务 HTTPS 根地址').grid(row=0, column=0, padx=5)
-    ttk.Entry(frame, textvariable=app.catalog_url_var, width=55).grid(row=0, column=1, sticky='ew')
-    def save():
-        try:
-            target = save_catalog_settings(root, app.catalog_url_var.get())
-            app.catalog_url_var.set(target)
-            messagebox.showinfo('配置已保存', '已启用上架后自动上传；上传失败不影响上架，可从台账补传。' if target else '已关闭共享资料自动上传。')
-        except Exception as error:
-            messagebox.showerror('设置未保存', str(error))
-    ttk.Button(frame, text='保存上传配置', command=save).grid(row=0, column=2, padx=5)
-    ttk.Button(frame, text='连接测试 / 失败补传', command=lambda: open_catalog_connection(app, root)).grid(row=0, column=3, padx=5)
-    ttk.Label(frame, text='保存地址即自动启用；留空保存即关闭。图片上传 OSS，资料在上架和台账完成后自动上传，失败仅记录日志。\n共享库中的采购成本、商品名称、规格、尺寸及图片链接公开可读。', foreground='#666').grid(row=1, column=0, columnspan=4, sticky='w', pady=4)
-    ttk.Button(frame, text='查看上传记录（自动刷新）', command=lambda: open_upload_monitor(app, root)).grid(row=2, column=0, columnspan=2, sticky='w')
+def build_catalog_actions(app, parent, root):
+    frame = ttk.Frame(parent)
+    ttk.Label(frame, text='产品库').pack(side=tk.LEFT, padx=(0, 8))
+    ttk.Button(frame, text='连接测试 / 失败补传', command=lambda: open_catalog_connection(app, root)).pack(side=tk.LEFT, padx=4)
+    ttk.Button(frame, text='查看上传记录', command=lambda: open_upload_monitor(app, root)).pack(side=tk.LEFT, padx=4)
     return frame
 
 
@@ -80,26 +53,12 @@ def open_upload_monitor(app, root):
 
 
 def open_catalog_connection(app, root):
-    settings_path = Path(root) / 'shared-catalog-settings.json'
-    config = load_json(settings_path, {})
+    target = CATALOG_SERVER_URL
     window = tk.Toplevel(app.root)
     window.title('wff 产品库：资料上传（免登录 v1）')
-    url = tk.StringVar(value=config.get('base_url', ''))
-    ttk.Label(window, text='服务 HTTPS 根地址').grid(row=0, column=0, padx=10, pady=10)
-    ttk.Entry(window, textvariable=url, width=58).grid(row=0, column=1, padx=10)
     ttk.Label(window, text='无需账号或密钥。采购成本、商品名称、规格、尺寸及图片链接入库后公开可读。\n文案、标签、完整属性、售价库存不在接口范围，继续保存在本地台账。', wraplength=620).grid(row=1, column=0, columnspan=2, padx=10, pady=8)
-    ttk.Label(window, text='保存 HTTPS 地址后自动上传；失败不影响上架。留空保存可关闭。').grid(row=2, column=0, columnspan=2, padx=10, pady=8)
-    def save():
-        try:
-            target = save_catalog_settings(root, url.get())
-            if hasattr(app, 'catalog_url_var'):
-                app.catalog_url_var.set(target)
-            return target
-        except Exception as error:
-            messagebox.showerror('设置未保存', str(error), parent=window)
-            return None
+    ttk.Label(window, text='上架和台账完成后自动上传；失败不影响上架。').grid(row=2, column=0, columnspan=2, padx=10, pady=8)
     def connect():
-        target = save()
         if target:
             def worker():
                 client = CatalogClient(target)
@@ -111,11 +70,9 @@ def open_catalog_connection(app, root):
                     client.close()
             app._run(worker)
     def retry():
-        target = save()
         if target and messagebox.askyesno('补传资料', '将原样重试此服务器的待传请求，不重新上架，也不覆盖既有产品。是否继续？', parent=window):
             app._run(lambda: CatalogOutbox(root).retry(target, app._log))
     def ledger():
-        target = save()
         if not target:
             return
         path = filedialog.askopenfilename(parent=window, title='选择本地产品台账', filetypes=[('Excel', '*.xlsx')])
@@ -185,5 +142,5 @@ def open_catalog_connection(app, root):
         ttk.Button(preview, text='从成功提交记录补齐台账图片链接', command=backfill).pack(pady=5)
     actions = ttk.Frame(window)
     actions.grid(row=3, column=0, columnspan=2, pady=10)
-    for label, action in (('保存设置', save), ('测试连接', connect), ('补传待传记录', retry), ('从台账补传基础资料', ledger)):
+    for label, action in (('测试连接', connect), ('补传待传记录', retry), ('从台账补传基础资料', ledger)):
         ttk.Button(actions, text=label, command=action).pack(side=tk.LEFT, padx=5)

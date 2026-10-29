@@ -14,6 +14,8 @@ from shared_catalog_client import CatalogClient, CatalogRequestError
 from product_ledger import ledger_image_urls
 from catalog_contract import public_url, validate_product, validate_upload_capabilities, validate_receipt, valid_number, text_field
 
+CATALOG_SERVER_URL = 'https://erp.wxzwxz.xyz'
+
 
 def numeric(value, positive=False):
     if value is None or str(value).strip() == '':
@@ -205,12 +207,9 @@ def upload_after_listing(root, row, images, log):
     """All failures, including local outbox writes, are nonfatal to platform listing."""
     path = None
     try:
-        config = load_json(Path(root) / 'shared-catalog-settings.json', {})
-        if not config.get('enabled'):
-            return
         outbox = CatalogOutbox(root)
-        path = outbox.prepare(row, config['base_url'], images)
-        outbox.send(path, config['base_url'])
+        path = outbox.prepare(row, CATALOG_SERVER_URL, images)
+        outbox.send(path, CATALOG_SERVER_URL)
         log('产品资料已入库 wff 产品库；初始状态由服务器设为 ready，图片文件仍保存在 OSS')
     except Exception as error:
         if path is None:

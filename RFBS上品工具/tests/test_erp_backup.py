@@ -24,19 +24,20 @@ def fixture():
 
 
 class BackupTests(unittest.TestCase):
-    def test_disabled_backup_ignores_even_enabled_legacy_config(self):
+    def test_fixed_catalog_hook_ignores_legacy_config(self):
         from app import RfbsListingApp
         app = object.__new__(RfbsListingApp)
         app._log = Mock()
         app._save_auto_jobs = Mock()
-        app._product_ledger_record = Mock(side_effect=OSError('simulated backup disk error'))
+        app._product_ledger_record = Mock(return_value={'offer_id': 'TEST'})
         job = {'id': 'task'}
         def settings(path, default=None):
             return {'enabled': True, 'base_url': 'http://localhost:8788'} if Path(path).name == 'erp-backup-settings.json' else {}
-        with patch('app.load_json', side_effect=settings):
+        with patch('app.load_json', side_effect=settings), patch('catalog_upload.upload_after_listing') as upload:
             app._backup_to_product_library('unused.json', {}, {}, 1, 1, 1, [], job)
         self.assertEqual(job, {'id': 'task'})
-        app._product_ledger_record.assert_not_called()
+        app._product_ledger_record.assert_called_once()
+        upload.assert_called_once()
         app._save_auto_jobs.assert_not_called()
         app._log.assert_not_called()
 

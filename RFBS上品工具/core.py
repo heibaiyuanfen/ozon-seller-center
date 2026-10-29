@@ -1260,6 +1260,10 @@ def validate_required(attributes: list[dict[str, Any]], definitions: list[dict[s
 
 
 def build_import_item(product: ProductInput, reference: ReferenceProduct, image_urls: list[str], attributes: list[dict[str, Any]], complex_attributes: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    for key, label in (("depth", "包装长度"), ("width", "包装宽度"), ("height", "包装高度"), ("weight", "包装重量")):
+        value = Decimal(str(getattr(product, key)))
+        if not value.is_finite() or value <= 0 or value != value.to_integral_value() or value > 2147483647:
+            raise ValueError(f"{label}必须填写正整数（当前值：{value}）；请核对单位和实际包装尺寸")
     if not image_urls or any(not url.startswith("https://") for url in image_urls):
         raise ValueError("至少需要一张可公开访问的 HTTPS 商品图片")
     if not product.offer_id.strip():

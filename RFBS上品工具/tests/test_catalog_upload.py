@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
-from catalog_upload import CatalogOutbox, product_data, upload_after_listing
+from catalog_upload import CatalogOutbox, CATALOG_SERVER_URL, product_data, upload_after_listing
 from core import load_json, atomic_write_json
 
 
@@ -107,10 +107,16 @@ class CatalogUploadTests(unittest.TestCase):
             self.assertTrue(log.called)
             self.assertTrue(list(box.root.glob('*.request.json')))
 
-    def test_disabled_upload_does_not_create_outbox(self):
+    def test_fixed_server_ignores_legacy_disabled_settings(self):
         with tempfile.TemporaryDirectory() as folder:
-            upload_after_listing(folder, row(), [], Mock())
-            self.assertFalse((Path(folder) / 'shared-catalog-outbox').exists())
+            settings = Path(folder) / 'shared-catalog-settings.json'
+            atomic_write_json(settings, {'enabled': False, 'base_url': 'https://old.example.com'})
+            original = settings.read_bytes()
+            with patch('catalog_upload.CatalogOutbox.send') as send:
+                upload_after_listing(folder, row(), [], Mock())
+            self.assertEqual(send.call_args.args[1], CATALOG_SERVER_URL)
+            self.assertEqual(settings.read_bytes(), original)
+            self.assertTrue(list((Path(folder) / 'shared-catalog-outbox').glob('*.request.json')))
 
     def test_app_backup_hook_never_propagates_preparation_failure(self):
         from app import RfbsListingApp

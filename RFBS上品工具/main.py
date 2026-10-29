@@ -129,6 +129,10 @@ def packaging_smoke_test() -> int:
     root = tk.Tk()
     root.withdraw()
     app = RfbsListingApp(root)
+    from catalog_upload import CATALOG_SERVER_URL
+    assert CATALOG_SERVER_URL == 'https://erp.wxzwxz.xyz'
+    assert not hasattr(app, 'catalog_url_var')
+    assert app.catalog_actions_frame.winfo_exists()
     saved_definitions = app.attribute_definitions
     app.attribute_definitions = [{'id': 111, 'name': 'Material'}]
     try:
