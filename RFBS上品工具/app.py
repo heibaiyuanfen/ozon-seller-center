@@ -335,6 +335,137 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
             self.supplier_panel.pack(fill=tk.BOTH, expand=True)
         except (OSError, ValueError) as error:
             ttk.Label(self.supplier_tab, text=f"1688 工作区读取失败：{error}").pack(padx=12, pady=12)
+        self.store_tab = ttk.Frame(self.notebook, padding=12)
+        self.notebook.add(self.store_tab, text="9. 店铺采集")
+        self._build_store_collection()
+
+    def _build_store_collection(self):
+        tab = self.store_tab
+        bar = ttk.Frame(tab)
+        bar.pack(fill=tk.X)
+        ttk.Label(bar, text="Ozon 店铺链接").pack(side=tk.LEFT)
+        self.store_url_var = tk.StringVar(value="https://www.ozon.ru/seller/mdmprint/")
+        ttk.Entry(bar, textvariable=self.store_url_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+        self.store_collect_button = ttk.Button(bar, text="采集商品", command=self._collect_store_products)
+        self.store_collect_button.pack(side=tk.LEFT)
+        ttk.Button(bar, text="导入浏览器保存的网页", command=self._import_store_html).pack(side=tk.LEFT, padx=6)
+        self.store_status_var = tk.StringVar(value="等待采集")
+        ttk.Label(tab, textvariable=self.store_status_var).pack(anchor="w", pady=8)
+        self.store_drafts = load_json(APP_DIR / 'store-review-drafts.json', {}) or {}
+        self.store_tree = ttk.Treeview(tab, columns=("title", "url", "review"), show="headings", selectmode="extended")
+        self.store_tree.heading("title", text="商品名称（页面可见内容）")
+        self.store_tree.heading("url", text="商品链接")
+        self.store_tree.heading("review", text="审核状态")
+        self.store_tree.column("title", width=450)
+        self.store_tree.column("url", width=350)
+        self.store_tree.column("review", width=110)
+        self.store_tree.pack(fill=tk.BOTH, expand=True)
+        actions = ttk.Frame(tab)
+        actions.pack(fill=tk.X, pady=8)
+        ttk.Button(actions, text="载入选中商品到工作台", command=self._load_store_product).pack(side=tk.LEFT)
+        ttk.Button(actions, text="保存工作台审核结果", command=self._save_store_review).pack(side=tk.LEFT, padx=6)
+        ttk.Button(actions, text="批量上架选中审核商品", command=self._enqueue_store_reviews).pack(side=tk.LEFT, padx=6)
+
+    def _import_store_html(self):
+        path = filedialog.askopenfilename(title="选择 Chrome 保存的店铺网页", filetypes=[("网页文件", "*.html *.htm")])
+        if not path:
+            return
+        try:
+            from store_collection import product_links_from_html
+            with open(path, 'r', encoding='utf-8-sig', errors='replace') as source:
+                links = product_links_from_html(source.read())
+            existing = {self.store_tree.item(key, 'values')[1] for key in self.store_tree.get_children()}
+            added = 0
+            for url in links:
+                if url not in existing:
+                    self.store_tree.insert('', tk.END, values=('', url, '已审核' if url in self.store_drafts else '待审核'))
+                    existing.add(url)
+                    added += 1
+            self.store_status_var.set(f'本次导入 {added} 件；总计 {len(existing)} 件，仅包含保存页面中的链接，未验证全店完整性')
+        except (OSError, ValueError) as error:
+            messagebox.showerror('导入失败', str(error))
+
+    def _collect_store_products(self):
+        url = self.store_url_var.get().strip()
+        self.store_collect_button.state(["disabled"])
+        def worker():
+            try:
+                from store_collection import collect_visible_store
+                rows = collect_visible_store(url, APP_DIR / "store-browser-profile",
+                    lambda step, count: self.root.after(0, lambda step=step, count=count: self.store_status_var.set(
+                        f"采集第 {step} 次滚动，已找到 {count} 件；如有验证请在浏览器中完成")))
+                def show():
+                    self.store_tree.delete(*self.store_tree.get_children())
+                    for row in rows:
+                        self.store_tree.insert("", tk.END, values=(row['title'], row['url'], '已审核' if row['url'] in self.store_drafts else '待审核'))
+                    self.store_status_var.set(f"采集到 {len(rows)} 件；仅包含滚动加载的商品，未验证全店完整性")
+                self.root.after(0, show)
+            except Exception as error:
+                message = str(error)
+                self.root.after(0, lambda: messagebox.showerror("店铺采集失败", message))
+            finally:
+                self.root.after(0, lambda: self.store_collect_button.state(["!disabled"]))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _load_store_product(self):
+        selected = self.store_tree.selection()
+        if not selected:
+            messagebox.showwarning("未选择商品", "请先选择一个商品")
+            return
+        url = self.store_tree.item(selected[0], "values")[1]
+        self._job_var("listing_mode", "follow").set("follow")
+        self._on_listing_mode_changed()
+        self._job_var("source_url").set(url)
+        self._job_var("offer_id").set(self._new_offer_id())
+        self._job_var("model_name").set("")
+        self.notebook.select(self.workbench_tab)
+
+    def _save_store_review(self):
+        try:
+            base = self._job_inputs_from_form()
+            url = base.get('source_url', '')
+            if self._local_listing_enabled(base) or not url or not any(self.store_tree.item(key, 'values')[1] == url for key in self.store_tree.get_children()):
+                raise ValueError('请先将店铺列表中的商品载入工作台，使用跟卖模式填写并核对参数')
+            if not str(base.get('purchase_cost') or '').strip():
+                raise ValueError('请填写并核对该商品的采购成本')
+            for item in self._expand_job_inputs_for_shops(copy.deepcopy(base), 'review'):
+                self._validate_job_inputs(item)
+            self.store_drafts[url] = base
+            atomic_write_json(APP_DIR / 'store-review-drafts.json', self.store_drafts)
+            for key in self.store_tree.get_children():
+                title, link, _ = self.store_tree.item(key, 'values')
+                if link == url:
+                    self.store_tree.item(key, values=(title, link, '已审核'))
+            self.store_status_var.set('审核已保存，请继续核对其他商品')
+        except Exception as error:
+            messagebox.showerror('审核未保存', str(error))
+
+    def _enqueue_store_reviews(self):
+        selected = self.store_tree.selection()
+        if not selected:
+            messagebox.showwarning('未选择商品', '请选择已经审核的商品，可使用 Ctrl 或 Shift 多选')
+            return
+        planned = []
+        try:
+            for key in selected:
+                url = self.store_tree.item(key, 'values')[1]
+                if url not in self.store_drafts:
+                    raise ValueError(f'商品 {url} 尚未审核')
+                base = copy.deepcopy(self.store_drafts[url])
+                expanded = self._expand_job_inputs_for_shops(base, 'store-' + uuid.uuid4().hex)
+                for inputs in expanded:
+                    self._validate_job_inputs(inputs)
+                planned.extend(expanded)
+            keys = [(item['ozon_shop_id'], item['offer_id']) for item in planned]
+            with self.auto_job_lock:
+                existing = {(job.get('inputs', {}).get('ozon_shop_id'), job.get('inputs', {}).get('offer_id')) for job in self.auto_jobs.values()}
+            if len(keys) != len(set(keys)) or any(key in existing for key in keys):
+                raise ValueError('货号重复或已有任务，请检查现有队列，避免重复上架')
+            summary = '\n'.join(f"{item['ozon_shop_name']} / {item['offer_id']} / 售价 {item['price']}" for item in planned[:20])
+            if messagebox.askyesno('确认批量上架', f'共 {len(selected)} 件商品、{len(planned)} 个店铺任务。确认成本、尺寸、类目和价格均已核实？\n{summary}'):
+                self._enqueue_prepared_inputs(planned, '店铺采集商品')
+        except Exception as error:
+            messagebox.showerror('无法批量上架', str(error))
 
     def _apply_supplier_variant(self, product, variant):
         if not variant.get("images"):
