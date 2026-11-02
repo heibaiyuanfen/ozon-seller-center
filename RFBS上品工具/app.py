@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import uuid
+import webbrowser
 import tkinter as tk
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
@@ -543,6 +544,8 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         ttk.Button(controls, text="导入 Seerfar Excel", command=self._choose_product_pool_excel).grid(row=0, column=0, padx=(0, 6))
         ttk.Button(controls, text="编辑选中产品", command=self._edit_selected_pool_product).grid(row=0, column=1, padx=6)
         ttk.Button(controls, text="载入自动工作台", command=self._load_selected_pool_product).grid(row=0, column=2, padx=6)
+        ttk.Button(controls, text="设置池子 Ozon 类目", command=self._choose_pool_category).grid(row=0, column=6, padx=6)
+        ttk.Button(controls, text="读取/刷新类目", command=lambda: self._run(self._load_categories_with_retry)).grid(row=0, column=7, padx=6)
         ttk.Label(controls, text="搜索").grid(row=0, column=3, padx=(18, 4))
         self.product_pool_search_var = tk.StringVar()
         search = ttk.Entry(controls, textvariable=self.product_pool_search_var, width=26)
@@ -573,15 +576,31 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         ttk.Label(filters, text="自动筛选结果").pack(side=tk.LEFT, padx=(12, 4))
         self.pool_review_filter_var = tk.StringVar(value="全部")
         review_filter = ttk.Combobox(filters, textvariable=self.pool_review_filter_var,
-            values=("全部", "通过", "待补充", "淘汰"), state="readonly", width=12)
+            values=("全部", "已审核", "待审核"), state="readonly", width=12)
         review_filter.pack(side=tk.LEFT)
         review_filter.bind("<<ComboboxSelected>>", lambda _event: self._refresh_product_pool_tree())
         review_controls = ttk.Frame(controls)
         review_controls.grid(row=2, column=0, columnspan=6, sticky="w", pady=8)
         ttk.Button(review_controls, text="选品规则", command=self._edit_pool_rules).pack(side=tk.LEFT, padx=4)
         ttk.Button(review_controls, text="确认选中销量周期", command=self._confirm_pool_sales_period).pack(side=tk.LEFT, padx=4)
-        ttk.Button(review_controls, text="批量审核 / 反向核价 / 入队", command=self._review_pool_selection).pack(side=tk.LEFT, padx=4)
-        ttk.Label(review_controls, text="Ctrl/Shift 多选；先在自动工作台选择目标店铺、类目、仓库及图片模式").pack(side=tk.LEFT, padx=8)
+        ttk.Button(review_controls, text="批量审核 / 自动核价 / 入队", command=self._review_pool_selection).pack(side=tk.LEFT, padx=4)
+        ttk.Button(review_controls, text="批量上架选中商品", command=self._enqueue_selected_pool_products).pack(side=tk.LEFT, padx=4)
+        ttk.Label(review_controls, text="Ctrl/Shift 多选；入队前请核对下方配置").pack(side=tk.LEFT, padx=8)
+        targets = ttk.Frame(controls)
+        targets.grid(row=3, column=0, columnspan=8, sticky="ew", pady=(0, 6))
+        ttk.Button(targets, text="选择店铺和仓库", command=self._open_multi_shop_selector).pack(side=tk.LEFT, padx=4)
+        ttk.Label(targets, textvariable=self._job_var("ozon_shop_display")).pack(side=tk.LEFT, padx=4)
+        ttk.Label(targets, text="仓库 ID：").pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Entry(targets, textvariable=self._job_var("warehouse_id"), width=20).pack(side=tk.LEFT)
+        ttk.Button(targets, text="设置池子类目", command=self._choose_pool_category).pack(side=tk.LEFT, padx=(10, 4))
+        ttk.Label(targets, textvariable=self._job_var("category_display"), width=38).pack(side=tk.LEFT)
+        modes = ttk.Frame(controls)
+        modes.grid(row=4, column=0, columnspan=8, sticky="w", pady=(0, 6))
+        ttk.Label(modes, text="图片处理：").pack(side=tk.LEFT, padx=4)
+        for label, mode in (("原图直传", "original"), ("API 生图", "api"), ("Codex 桌面任务", "codex_desktop")):
+            ttk.Radiobutton(modes, text=label, variable=self._var("image_mode", "api"), value=mode).pack(side=tk.LEFT, padx=4)
+        ttk.Label(modes, text="汇率（1 CNY = RUB）：").pack(side=tk.LEFT, padx=(20, 4))
+        ttk.Entry(modes, textvariable=self._job_var("shipping_exchange_rate", "12.5"), width=10).pack(side=tk.LEFT)
         frame = ttk.Frame(tab)
         frame.grid(row=3, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
@@ -615,6 +634,14 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         tree = getattr(self, "product_pool_tree", None)
         if tree is None:
             return
+        from pool_review import listed_source_ids, source_identity
+        try:
+            listed_sources = listed_source_ids(PRODUCT_LEDGER_PATH)
+            history_warning = ''
+        except Exception as error:
+            listed_sources = set()
+            history_warning = f'；台账读取失败，无法判断已上架：{error}'
+        tree.tag_configure('listed', foreground='#c62828')
         selected = tree.selection()
         tree.delete(*tree.get_children())
         query = self.product_pool_search_var.get().strip().casefold()
@@ -657,17 +684,18 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
             if result_filter != "全部" and result["status"] != result_filter:
                 continue
             shown += 1
-            self.product_pool_tree.insert("", tk.END, iid=str(index), values=(
+            listed = source_identity(item) in listed_sources
+            self.product_pool_tree.insert("", tk.END, iid=str(index), tags=('listed',) if listed else (), values=(
                 item.get("no") or item.get("excel_row"), item.get("title"), item.get("sku"),
                 item.get("market_price"), item.get("sales"), item.get("fulfillment"),
                 item.get("supplier_1688_url"), item.get("offer_id"), item.get("price"),
-                result["status"],
+                ('已上架 | ' if listed else '') + result["status"],
             ))
         for item_id in selected:
             if tree.exists(item_id):
                 tree.selection_add(item_id)
         self.product_pool_status_var.set(
-            f"显示 {shown} / 共 {len(self.product_pool_products)} 个；双击编辑，审核表查看原因"
+            f"显示 {shown} / 共 {len(self.product_pool_products)} 个；红色为本机台账已完成上架商品{history_warning}"
             if self.product_pool_products else "尚未导入 Excel"
         )
 
@@ -711,6 +739,8 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
             "products": self.product_pool_products,
             "mappings": mapping_payload(self.product_pool_products),
             "rules": self._pool_rules(),
+            "entry_defaults": getattr(self, 'pool_entry_defaults', {}),
+            "category_display": getattr(self, 'pool_category_display', ''),
         })
 
     def _load_product_pool(self):
@@ -720,6 +750,8 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
             products = []
         self.product_pool_products = [dict(item) for item in products if isinstance(item, dict)]
         self.product_pool_source_path = str(payload.get("source_path") or "") if isinstance(payload, dict) else ""
+        self.pool_entry_defaults = dict(payload.get('entry_defaults') or {}) if isinstance(payload, dict) else {}
+        self.pool_category_display = str(payload.get('category_display') or '') if isinstance(payload, dict) else ''
         from pool_review import validate_rules
         try:
             self.product_pool_rules = validate_rules(payload.get("rules", {}) if isinstance(payload, dict) else {})
@@ -727,6 +759,42 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
             self.product_pool_rules = {}
             self._log("选品规则无效，已使用默认规则；请打开选品规则重新确认")
         self._refresh_product_pool_tree()
+
+    def _choose_pool_category(self):
+        choices = list(self.category_by_display)
+        if not choices:
+            messagebox.showwarning('未读取类目', '请先点击读取/刷新类目，完成后再选择')
+            return
+        window = tk.Toplevel(self.root)
+        window.title('选品池 Ozon 类目')
+        search = tk.StringVar()
+        search_row = ttk.Frame(window)
+        search_row.pack(fill=tk.X, padx=12, pady=(12, 0))
+        ttk.Label(search_row, text='搜索类目').pack(side=tk.LEFT, padx=(0, 8))
+        search_entry = ttk.Entry(search_row, textvariable=search)
+        search_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        count = tk.StringVar()
+        ttk.Label(search_row, textvariable=count, width=12).pack(side=tk.LEFT, padx=(8, 0))
+        value = tk.StringVar(value=getattr(self, 'pool_category_display', ''))
+        combo = ttk.Combobox(window, textvariable=value, values=choices, width=90, state='readonly')
+        combo.pack(fill=tk.X, padx=12, pady=12)
+        def filter_categories(*_):
+            terms = search.get().casefold().split()
+            matches = [choice for choice in choices if all(term in choice.casefold() for term in terms)]
+            combo.configure(values=matches)
+            count.set(f'{len(matches)} 个结果')
+        search.trace_add('write', filter_categories)
+        filter_categories()
+        search_entry.focus_set()
+        def save():
+            if value.get() not in self.category_by_display:
+                messagebox.showerror('未选择', '请选择有效类目', parent=window)
+                return
+            self.pool_category_display = value.get()
+            self._job_var('category_display').set(value.get())
+            self._save_product_pool()
+            window.destroy()
+        ttk.Button(window, text='保存类目', command=save).pack(pady=8)
 
     def _edit_selected_pool_product(self):
         item = self._selected_pool_product()
@@ -756,12 +824,12 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         ).grid(row=1, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 10))
         labels = {
             "supplier_1688_url": "采购链接", "offer_id": "货号（Offer ID）", "model_name": "型号名称",
-            "purchase_cost": "采购到手成本（含国内运费分摊）", "price": "原上架价（批审使用预计成交价）", "old_price": "折扣前价格",
+            "purchase_cost": "采购到手成本（CNY，含国内运费）", "price": "原上架参考价（RUB）", "old_price": "折扣前价格（CNY）",
             "target_roi": "目标 ROI（%）", "sales_commission_percent": "标准佣金（%）",
             "net_weight": "商品净重（克）", "weight": "包装毛重（克）",
             "depth": "包装长度（毫米）", "width": "包装宽度（毫米）", "height": "包装高度（毫米）",
             "stock": "可售库存", "notes": "备注",
-            "review_price": "预计成交价（空＝市场参考价）",
+            "review_price": "预计成交价（CNY，空＝市场价按汇率换算）",
             "sales_period_days": "销量统计周期（天，须核对导出范围）",
             "supplier_sku": "采购规格/SKU（颜色、尺寸、件数等）",
             "supplier_confirmed": "已核对同款规格、库存与交期",
@@ -775,9 +843,21 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
             "target_roi": "60", "old_price": "0", "sales_commission_percent": "",
             "stock": "1",
         }
+        defaults.update(getattr(self, 'pool_entry_defaults', {}))
+        defaults['offer_id'] = self._new_offer_id()
+        defaults['model_name'] = defaults['offer_id']
+        link = str(item.get('listing_url') or '')
+        if not link and str(item.get('sku') or '').isdigit():
+            link = 'https://www.ozon.ru/product/' + str(item['sku']) + '/'
+        if link.startswith(('https://www.ozon.ru/', 'https://ozon.ru/')):
+            ttk.Button(form, text='打开 Ozon 商品链接', command=lambda: webbrowser.open(link)).grid(row=1, column=1, sticky='e', padx=14)
         variables = {}
+        commission_label = None
         for row, field in enumerate(MAPPING_FIELDS, start=2):
-            ttk.Label(form, text=labels[field]).grid(row=row, column=0, sticky="w", padx=14, pady=4)
+            label = ttk.Label(form, text=labels[field])
+            label.grid(row=row, column=0, sticky="w", padx=14, pady=4)
+            if field == 'sales_commission_percent':
+                commission_label = label
             variable = tk.StringVar(value=str(item.get(field) or defaults.get(field, "")))
             variables[field] = variable
             if field in {"supplier_confirmed", "economics_confirmed"}:
@@ -787,16 +867,39 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
             else:
                 ttk.Entry(form, textvariable=variable, width=42).grid(row=row, column=1, sticky="ew", padx=(0, 14), pady=4)
         form.columnconfigure(1, weight=1)
+        preview_var = tk.StringVar(value='自动售价：待填写成本、重量和核价参数')
+        ttk.Label(form, textvariable=preview_var, foreground='#245a8d').grid(row=2 + len(MAPPING_FIELDS), column=0, columnspan=2, sticky='w', padx=14, pady=4)
+        def update_preview(*_):
+            try:
+                values = {key: variable.get().strip() for key, variable in variables.items()}
+                values['shipping_exchange_rate'] = self._job_var('shipping_exchange_rate', '12.5').get().strip()
+                values['fbp_pricing'] = self._job_var('fbp_pricing', '0').get().strip()
+                defaults = self._pool_rules()
+                for key in ('label_fee', 'advertising_percent', 'cargo_loss_percent'):
+                    if not values.get(key):
+                        values[key] = defaults[key]
+                breakdown = self._job_price_breakdown(values)
+                rub = breakdown.price * Decimal(values['shipping_exchange_rate'])
+                warning = rub > Decimal('1500')
+                preview_var.set(f'自动售价（ROI 核价）：{breakdown.price:.2f} CNY / {rub:.2f} RUB' + ('；超过 1500 RUB，请核对佣金' if warning else ''))
+                commission_label.configure(foreground='#c62828' if warning else '')
+            except (ValueError, InvalidOperation, ArithmeticError):
+                preview_var.set('自动售价：请填写有效的成本、重量、费率和汇率')
+                commission_label.configure(foreground='')
+        for key in ('purchase_cost', 'weight', 'target_roi', 'sales_commission_percent', 'label_fee', 'advertising_percent', 'cargo_loss_percent'):
+            variables[key].trace_add('write', update_preview)
+        update_preview()
         def save():
             for field, variable in variables.items():
                 item[field] = variable.get().strip()
+            self.pool_entry_defaults = {key: item[key] for key in ('old_price', 'target_roi', 'sales_commission_percent', 'label_fee', 'advertising_percent', 'cargo_loss_percent', 'depth', 'width', 'height')}
             item["review_confirmed_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
             item.pop("review_result", None)
             self._save_product_pool()
             self._refresh_product_pool_tree()
             window.destroy()
         buttons = ttk.Frame(form)
-        buttons.grid(row=2 + len(MAPPING_FIELDS), column=0, columnspan=2, sticky="e", padx=14, pady=14)
+        buttons.grid(row=3 + len(MAPPING_FIELDS), column=0, columnspan=2, sticky="e", padx=14, pady=14)
         ttk.Button(buttons, text="保存", command=save).pack(side=tk.LEFT, padx=5)
         ttk.Button(buttons, text="取消", command=window.destroy).pack(side=tk.LEFT, padx=5)
 
@@ -808,11 +911,12 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         self._job_var("source_url").set(str(item.get("listing_url") or item.get("sku") or ""))
         for field in (
             "supplier_1688_url", "offer_id", "model_name", "purchase_cost", "price", "old_price",
-            "target_roi", "sales_commission_percent", "net_weight", "weight", "depth", "width", "height", "stock",
+            "target_roi", "sales_commission_percent", "label_fee", "advertising_percent", "cargo_loss_percent", "net_weight", "weight", "depth", "width", "height", "stock",
         ):
             value = str(item.get(field) or "").strip()
-            if value:
-                self._job_var(field).set(value)
+            self._job_var(field).set(value)
+        if getattr(self, 'pool_category_display', ''):
+            self._job_var('category_display').set(self.pool_category_display)
         self._on_listing_mode_changed()
         pricing_keys = (
             "purchase_cost", "label_fee", "target_roi", "advertising_percent",
@@ -820,8 +924,8 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         )
         if all(self._job_var(key).get().strip() for key in pricing_keys):
             self._update_job_price()
-        elif str(item.get("price") or "").strip():
-            self._job_var("price").set(str(item["price"]).strip())
+        else:
+            self._job_var("price").set("")
         self.notebook.select(self.workbench_tab)
         self.auto_status_var.set(
             f"已从 Excel 选品池载入 SKU {item.get('sku') or '-'}；请确认店铺、类目、仓库和上架参数"

@@ -16,12 +16,12 @@ def product(**overrides):
         "depth": "100", "width": "100", "height": "100", "stock": "1", "model_name": "LAMP",
         "supplier_1688_url": "https://detail.1688.com/offer/123.html", "supplier_sku": "白色 / 单件",
         "supplier_confirmed": "1", "economics_confirmed": "1", "review_confirmed_at": datetime.now().isoformat(),
-        "offer_id": "OFFER-1", "old_price": "0", **overrides}
+        "offer_id": "OFFER-1", "old_price": "0", "review_price": "1000", **overrides}
 
 
 class PoolReviewTests(unittest.TestCase):
     def test_review_uses_configured_exchange_for_tariff_and_reverse_budget(self):
-        item = product(market_price="120", purchase_cost="1", weight="520")
+        item = product(market_price="120", review_price="120", purchase_cost="1", weight="520")
         rules = {**DEFAULT_RULES, "min_roi": "0", "min_margin": "0"}
         low = evaluate_product(item, rules, exchange_rate="12.5")
         high = evaluate_product(item, rules, exchange_rate="15")
@@ -54,6 +54,11 @@ class PoolReviewTests(unittest.TestCase):
         self.assertEqual(result["price"], "200")
         self.assertEqual(result["status"], "淘汰")
         self.assertIn("利润未达标", result["reason"])
+
+    def test_market_price_rub_converts_to_cny(self):
+        result = evaluate_product(product(market_price='1250', review_price='', purchase_cost='1'),
+                                  {**DEFAULT_RULES, 'min_roi': '0', 'min_margin': '0'}, exchange_rate='12.5')
+        self.assertEqual(Decimal(result['price']), Decimal('100'))
 
     def test_missing_data_never_defaults_to_zero_or_pass(self):
         for field in ("market_price", "weight", "purchase_cost", "sales_commission_percent", "sales_period_days", "supplier_sku", "model_name", "net_weight", "depth", "review_confirmed_at"):
@@ -93,6 +98,12 @@ class PoolReviewTests(unittest.TestCase):
 
 
 class PoolQueueTests(unittest.TestCase):
+    def test_rejected_review_is_warning_not_blocker(self):
+        app = self.app()
+        jobs = app._prepare_reviewed_pool_jobs([product(review_price='200')])
+        self.assertEqual(jobs[0]['inputs']['pool_review']['status'], '淘汰')
+        self.assertEqual(jobs[0]['inputs']['price'], '200')
+
     def app(self):
         app = RfbsListingApp.__new__(RfbsListingApp)
         app.auto_jobs = {}
@@ -103,7 +114,7 @@ class PoolQueueTests(unittest.TestCase):
         app.category_by_display = {"灯具": {"description_category_id": 1, "type_id": 2, "display": "灯具"}}
         app._job_inputs_from_form = Mock(return_value={"ozon_shop_id": "shop", "ozon_shop_name": "Test shop",
             "category_display": "灯具", "category_id": "1", "type_id": "2", "warehouse_id": "1",
-            "image_mode": "original", "fbp_pricing": "0", "stock": "999", "model_name": "WRONG-INHERITED"})
+            "image_mode": "original", "fbp_pricing": "0", "stock": "999", "model_name": "WRONG-INHERITED", "currency_code": "CNY"})
         app._new_offer_id = Mock(return_value="AUTO-1")
         return app
 
@@ -132,8 +143,8 @@ class PoolQueueTests(unittest.TestCase):
                 app._prepare_reviewed_pool_jobs([product(**fields)])
 
     def test_recomputes_after_cost_changes_instead_of_trusting_review_result(self):
-        with self.assertRaises(ValueError):
-            self.app()._prepare_reviewed_pool_jobs([product(purchase_cost="800", review_result={"status": "通过"})])
+        jobs = self.app()._prepare_reviewed_pool_jobs([product(purchase_cost="800", review_result={"status": "通过"})])
+        self.assertEqual(jobs[0]['inputs']['pool_review']['status'], '淘汰')
 
     def test_multi_shop_and_fbp(self):
         app = self.app()

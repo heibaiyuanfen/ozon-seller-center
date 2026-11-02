@@ -2,7 +2,7 @@
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from datetime import datetime
 from pathlib import Path
-from core import calculate_price_breakdown, calculate_shipping, extract_reference_article
+from core import calculate_price_breakdown, calculate_roi_price, calculate_shipping, extract_reference_article
 
 DEFAULT_RULES = {
     "category_keyword": "", "min_sales": "100", "sales_period_days": "30",
@@ -76,13 +76,38 @@ def read_listing_history(path):
     return sources, offers
 
 
+def listed_source_ids(path):
+    """Only classify confirmed completion as listed; pending ledger rows are not proof."""
+    if path is None or not Path(path).is_file():
+        return set()
+    from openpyxl import load_workbook
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        rows = workbook['产品台账'].iter_rows(values_only=True)
+        headers = {str(value): index for index, value in enumerate(next(rows))}
+        for column in ('平台', 'Ozon来源链接', '状态'):
+            if column not in headers:
+                raise ValueError('产品台账缺少字段：' + column)
+        result = set()
+        for row in rows:
+            def value(name):
+                index = headers[name]
+                return str(row[index] or '').strip() if index < len(row) else ''
+            status = value('状态')
+            if value('平台').casefold() == 'ozon' and value('Ozon来源链接') and ('上架及 RFBS 库存完成' in status or '商品已创建，库存已写入' in status):
+                result.add(source_identity({'source_url': value('Ozon来源链接')}))
+        return result
+    finally:
+        workbook.close()
+
+
 def pricing_values(item, rules, fbp=False):
     result = {}
     for key in ("label_fee", "advertising_percent", "cargo_loss_percent"):
         result[key] = str(item.get(key) if str(item.get(key, "")).strip() else rules[key])
     result["label_fee"] = "0" if fbp else result["label_fee"]
     result["sales_commission_percent"] = str(item.get("sales_commission_percent") or "")
-    result["target_roi"] = str(max(number(rules["min_roi"], "最低 ROI"), number(item.get("target_roi") or rules["min_roi"], "目标 ROI")))
+    result["target_roi"] = str(number(item.get("target_roi") or rules["min_roi"], "目标 ROI"))
     return result
 
 
@@ -106,7 +131,7 @@ def purchase_ceiling(price, weight_g, values, min_margin, fbp=False):
     return ceiling.quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
 
 
-def evaluate_product(item, rules, *, fbp=False, now=None, exchange_rate="12.5"):
+def _legacy_evaluate_product(item, rules, *, fbp=False, now=None, exchange_rate="12.5"):
     rules = validate_rules(rules)
     rejected, pending = [], []
     result = {"status": "待补充", "reason": "", "ceiling": "", "profit": "", "roi": "", "margin": "", "price": ""}
@@ -129,7 +154,8 @@ def evaluate_product(item, rules, *, fbp=False, now=None, exchange_rate="12.5"):
             if rules[key] and fail:
                 rejected.append("市场价超出筛选区间")
         # A user-reviewed intended selling price wins; never substitute an ROI-derived higher price.
-        price = number(item.get("review_price") or market, "预计成交价", minimum=Decimal("0.01"))
+        rate = number(exchange_rate, "CNY兑RUB汇率", minimum=Decimal("0.01"))
+        price = number(item.get("review_price"), "预计成交价(CNY)", minimum=Decimal("0.01")) if str(item.get("review_price") or "").strip() else market / rate
         result["price"] = str(price)
         weight = number(item.get("weight"), "包装毛重", minimum=Decimal("0.01"))
         if rules["max_weight"] and weight > Decimal(rules["max_weight"]):
@@ -176,4 +202,28 @@ def evaluate_product(item, rules, *, fbp=False, now=None, exchange_rate="12.5"):
         pending.append("缺来源 SKU/链接")
     result["status"] = "淘汰" if rejected else "待补充" if pending else "通过"
     result["reason"] = "；".join(dict.fromkeys(rejected + pending)) or "规则与人工货源确认通过，可预检入队"
+    return result
+
+
+def evaluate_product(item, rules, *, fbp=False, now=None, exchange_rate="12.5"):
+    rules = validate_rules(rules)
+    result = {"status": "待审核", "reason": "", "profit": "", "roi": "", "margin": "", "price": "", "price_rub": ""}
+    try:
+        values = pricing_values(item, rules, fbp)
+        rate = number(exchange_rate, "CNY兑RUB汇率", minimum=Decimal("0.01"))
+        weight = number(item.get("weight"), "包装毛重", minimum=Decimal("0.01")) / 1000
+        cost = number(item.get("purchase_cost"), "采购到手成本", minimum=Decimal("0.01"))
+        breakdown = calculate_roi_price(cost, values['label_fee'], values['target_roi'], weight,
+            sales_commission_percent=values['sales_commission_percent'], exchange_rate=rate,
+            sales_commission_discount_percent='1' if fbp else '0',
+            advertising_percent=values['advertising_percent'], cargo_loss_percent=values['cargo_loss_percent'])
+        result.update(price=str(breakdown.price), price_rub=f'{breakdown.price * rate:.2f}',
+                      profit=f'{breakdown.profit:.2f}', roi=f'{breakdown.roi_percent:.2f}',
+                      margin=f'{breakdown.profit / breakdown.price * 100:.2f}')
+    except (ValueError, ArithmeticError) as error:
+        result['reason'] = str(error) or '核价参数无效'
+    if str(item.get('supplier_confirmed') or '') == '1' and str(item.get('economics_confirmed') or '') == '1' and item.get('review_confirmed_at'):
+        result['status'] = '已审核'
+    else:
+        result['reason'] = '；'.join(filter(None, (result['reason'], '待人工确认货源及成本包装')))
     return result

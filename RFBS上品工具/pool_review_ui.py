@@ -71,13 +71,13 @@ class PoolReviewMixin:
         fbp = self._job_var("fbp_pricing", "0").get() == "1"
         exchange_rate = self._job_var("shipping_exchange_rate", "12.5").get()
         window = tk.Toplevel(self.root)
-        window.title("批量审核 / 反向核价（本地计算，不调用 AI）")
+        window.title("批量审核 / 自动核价")
         window.geometry("1150x620")
-        ttk.Label(window, text=f"核价：{'FBP' if fbp else 'RFBS'}；ROI ≥ {rules['min_roi']}%；销售利润率 ≥ {rules['min_margin']}%。双击商品可返回编辑，审核后需重新打开此表。",
+        ttk.Label(window, text=f"核价：{'FBP' if fbp else 'RFBS'}；售价按每件商品的成本和目标 ROI 自动计算。双击商品可编辑，审核后需刷新。",
                   wraplength=1100).pack(fill=tk.X, padx=12, pady=8)
-        columns = ("sku", "price", "ceiling", "cost", "profit", "roi", "margin", "status", "reason")
+        columns = ("sku", "price", "price_rub", "cost", "profit", "roi", "margin", "status", "reason")
         tree = ttk.Treeview(window, columns=columns, show="headings", selectmode="extended")
-        for key, label, width in zip(columns, ("来源SKU", "预计成交价", "最高采购成本", "到手成本", "单件利润", "ROI%", "销售利润率%", "结果", "原因"), (110, 85, 100, 85, 85, 70, 100, 70, 350)):
+        for key, label, width in zip(columns, ("来源SKU", "自动售价 CNY", "自动售价 RUB", "到手成本 CNY", "单件利润 CNY", "ROI%", "销售利润率%", "审核状态", "说明"), (110, 110, 130, 110, 110, 70, 100, 80, 350)):
             tree.heading(key, text=label)
             tree.column(key, width=width, stretch=key == "reason")
         tree.pack(fill=tk.BOTH, expand=True, padx=12)
@@ -87,7 +87,7 @@ class PoolReviewMixin:
         for index, item in enumerate(items):
             result = evaluate_product(item, rules, fbp=fbp, exchange_rate=exchange_rate)
             item["review_result"] = {**result, "reviewed_at": time.strftime("%Y-%m-%d %H:%M:%S"), "rules": dict(rules), "fbp": fbp, "exchange_rate": exchange_rate}
-            tree.insert("", tk.END, iid=str(index), values=(item.get("sku"), result["price"], result["ceiling"], item.get("purchase_cost"), result["profit"], result["roi"], result["margin"], result["status"], result["reason"]))
+            tree.insert("", tk.END, iid=str(index), values=(item.get("sku"), result["price"], result["price_rub"], item.get("purchase_cost"), result["profit"], result["roi"], result["margin"], result["status"], result["reason"]))
         self._save_product_pool()
         def edit(_event=None):
             if tree.selection():
@@ -95,6 +95,15 @@ class PoolReviewMixin:
                 self.product_pool_tree.selection_set(str(self.product_pool_products.index(item)))
                 self._edit_selected_pool_product()
         tree.bind("<Double-1>", edit)
+        def open_product():
+            if tree.selection():
+                import webbrowser
+                item = items[int(tree.selection()[0])]
+                sku = str(item.get('sku') or '')
+                url = str(item.get('listing_url') or '') or (f'https://www.ozon.ru/product/{sku}/' if sku.isdigit() else '')
+                if url.startswith(('https://www.ozon.ru/', 'https://ozon.ru/')):
+                    webbrowser.open(url)
+        ttk.Button(window, text='打开选中商品链接', command=open_product).pack(side=tk.LEFT, padx=8, pady=10)
         def enqueue():
             chosen = [items[int(key)] for key in tree.selection()]
             if not chosen:
@@ -104,10 +113,21 @@ class PoolReviewMixin:
         ttk.Button(window, text="刷新本批审核", command=lambda: (window.destroy(), self._review_pool_selection())).pack(side=tk.LEFT, padx=12, pady=10)
         ttk.Button(window, text="选中商品预检并入队（需最终确认）", command=enqueue).pack(side=tk.RIGHT, padx=12, pady=10)
 
+    def _enqueue_selected_pool_products(self):
+        items = self._selected_pool_items()
+        if not items:
+            messagebox.showwarning('未选择', '请先选择需要上架的商品，可使用 Ctrl 或 Shift 多选')
+            return
+        self._enqueue_reviewed_pool_items(items, self.root, close_parent=False)
+
     def _prepare_reviewed_pool_jobs(self, items, offer_ids=None):
         """Read current inputs again; do not trust a stale UI review or inherit product facts."""
         rules = self._pool_rules()
         base = self._job_inputs_from_form()
+        if getattr(self, 'pool_category_display', ''):
+            base['category_display'] = self.pool_category_display
+        if str(base.get('currency_code') or '').upper() != 'CNY':
+            raise ValueError('选品池审核价格以 CNY 计算，请先将工作台上架币种设置为 CNY')
         fbp = str(base.get("fbp_pricing") or "0") == "1"
         now = time.strftime("%Y-%m-%d %H:%M:%S")
         jobs, identities, offers = [], set(), set()
@@ -115,8 +135,8 @@ class PoolReviewMixin:
         listed_sources, listed_offers = read_listing_history(getattr(self, "PRODUCT_LEDGER_PATH", None))
         for item in items:
             result = evaluate_product(item, rules, fbp=fbp, exchange_rate=base.get("shipping_exchange_rate", "12.5"))
-            if result["status"] != "通过":
-                raise ValueError(f"{item.get('sku')}: {result['status']}：{result['reason']}")
+            if not result["price"]:
+                raise ValueError(f"{item.get('sku')}: 无法计算有效售价：{result['reason']}")
             inputs = dict(base)
             # Only shop/category/warehouse/image settings come from the workbench.
             for key in ("offer_id", "model_name", "purchase_cost", "old_price", "sales_commission_percent", "net_weight", "weight", "depth", "width", "height", "stock", "supplier_1688_url"):
@@ -141,33 +161,36 @@ class PoolReviewMixin:
                     if old_inputs.get("ozon_shop_id") == target["ozon_shop_id"] and (
                         source_identity(old_inputs) == identity[0] or old_inputs.get("offer_id") == target["offer_id"]):
                         raise ValueError(f"{item.get('sku')} 在目标店铺已有队列记录，请继续原任务或处理历史记录")
-                self._validate_job_inputs(target)
-                # Existing validation derives an ROI price. Preserve the explicitly reviewed selling price.
+                try:
+                    self._validate_job_inputs(target)
+                except ArithmeticError as error:
+                    raise ValueError(f"{item.get('sku')}: 请检查重量、成本和核价参数") from error
+                # Preserve the same automatic price shown in the review.
                 target["price"] = result["price"]
                 target["pool_review"] = {**result, "reviewed_at": now, "rules": dict(rules), "fbp": fbp,
                     "confirmed_at": item.get("review_confirmed_at"), "supplier_sku": item.get("supplier_sku")}
                 if target.get("old_price") not in ("", "0") and float(target["old_price"]) <= float(target["price"]):
-                    raise ValueError("折扣前价格必须高于审核成交价，或填写 0")
+                    raise ValueError("折扣前价格必须高于自动售价，或填写 0")
                 identities.add(identity)
                 offers.add(offer)
                 jobs.append({"id": group + "-" + uuid.uuid4().hex[:6], "created_at": now, "updated_at": now,
                     "status": "queued", "stage": 0, "failed_stage": 0, "inputs": target, "state": {},
-                    "error": "", "message": "批量审核通过，等待运行", "task_id": 0,
+                    "error": "", "message": "等待运行；选品结果仅作参考", "task_id": 0,
                     "import_completed": False, "stock_completed": False, "ledger_completed": False, "cancel_requested": False})
         return jobs
 
-    def _enqueue_reviewed_pool_items(self, items, parent):
+    def _enqueue_reviewed_pool_items(self, items, parent, close_parent=True):
         try:
             jobs = self._prepare_reviewed_pool_jobs(items)
         except Exception as error:
             messagebox.showerror("整批未入队，请修正后重试", str(error), parent=parent)
             return
-        lines = "\n".join(f"{job['inputs']['ozon_shop_name']} | {job['inputs']['source_url']} | {job['inputs']['offer_id']} | {job['inputs']['price']} RUB | 仓库 {job['inputs']['warehouse_id']}" for job in jobs)
+        lines = "\n".join(f"{job['inputs']['ozon_shop_name']} | {job['inputs']['source_url']} | {job['inputs']['offer_id']} | {job['inputs']['price']} CNY | 仓库 {job['inputs']['warehouse_id']} | 选品提示：{job['inputs']['pool_review'].get('status')} {job['inputs']['pool_review'].get('reason', '')}" for job in jobs)
         preview = tk.Toplevel(parent)
         preview.title("最终确认：将真实上架")
         text = tk.Text(preview, width=110, height=22, wrap="word")
         text.pack(fill=tk.BOTH, expand=True)
-        text.insert("1.0", f"共 {len(items)} 件商品 / {len(jobs)} 个店铺任务。使用自动工作台当前所选类目、店铺、仓库和图片模式。\n\n" + lines)
+        text.insert("1.0", f"共 {len(items)} 件商品 / {len(jobs)} 个店铺任务。以下自动售价将真实提交，请仔细核对。\n\n" + lines)
         text.configure(state="disabled")
         def confirm():
             try:
@@ -190,7 +213,8 @@ class PoolReviewMixin:
             self._refresh_job_tree()
             self._start_auto_job_worker()
             preview.destroy()
-            parent.destroy()
+            if close_parent:
+                parent.destroy()
         ttk.Button(preview, text="确认加入队列并真实上架", command=confirm).pack(side=tk.RIGHT, padx=10, pady=10)
         ttk.Button(preview, text="取消", command=preview.destroy).pack(side=tk.LEFT, padx=10, pady=10)
         preview.transient(parent)
