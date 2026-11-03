@@ -594,6 +594,9 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         ttk.Entry(targets, textvariable=self._job_var("warehouse_id"), width=20).pack(side=tk.LEFT)
         ttk.Button(targets, text="设置池子类目", command=self._choose_pool_category).pack(side=tk.LEFT, padx=(10, 4))
         ttk.Label(targets, textvariable=self._job_var("category_display"), width=38).pack(side=tk.LEFT)
+        ttk.Button(targets, text="设置 WB 自动同步", command=lambda: self._review_wb_settings(self.root)).pack(side=tk.LEFT, padx=4)
+        self.pool_wb_status = tk.StringVar(value="默认关闭")
+        ttk.Label(targets, textvariable=self.pool_wb_status).pack(side=tk.LEFT)
         modes = ttk.Frame(controls)
         modes.grid(row=4, column=0, columnspan=8, sticky="w", pady=(0, 6))
         ttk.Label(modes, text="图片处理：").pack(side=tk.LEFT, padx=4)
@@ -738,6 +741,7 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
             "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "products": self.product_pool_products,
             "mappings": mapping_payload(self.product_pool_products),
+            "wb_defaults": self.pool_wb_defaults,
             "rules": self._pool_rules(),
             "entry_defaults": getattr(self, 'pool_entry_defaults', {}),
             "category_display": getattr(self, 'pool_category_display', ''),
@@ -750,6 +754,8 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
             products = []
         self.product_pool_products = [dict(item) for item in products if isinstance(item, dict)]
         self.product_pool_source_path = str(payload.get("source_path") or "") if isinstance(payload, dict) else ""
+        self.pool_wb_defaults = dict(payload.get("wb_defaults") or {}) if isinstance(payload, dict) else {}
+        self._show_pool_wb_defaults()
         self.pool_entry_defaults = dict(payload.get('entry_defaults') or {}) if isinstance(payload, dict) else {}
         self.pool_category_display = str(payload.get('category_display') or '') if isinstance(payload, dict) else ''
         from pool_review import validate_rules
@@ -2770,6 +2776,9 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
                 if local_mode else (article.group(0) if article else source)
             )
             detail = str(job.get("error") or job.get("message") or "")
+            if values.get("wb_sync"):
+                wb_detail = job.get("wb_error") or job.get("wb_progress") or (job.get("wb_state") or {}).get("message") or "等待文案和成品图"
+                detail = f"WB：{wb_detail} | {detail}"
             if job.get("status") == "running" and job.get("step_started_at"):
                 elapsed = max(0, int(time.time() - float(job["step_started_at"])))
                 detail += f" · 当前步骤已等待 {elapsed // 60}分{elapsed % 60}秒"
@@ -3379,40 +3388,52 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
                 self._ui_call(lambda: None)
                 self._checkpoint_auto_job(job, 3, "图片处理完成")
                 cancel_check()
-            if stage < 4:
-                cancel_check()
-                self._set_auto_progress(4, f"{offer_id}：上传图片到 OSS")
-                self._retry_step(
-                    "OSS 图片上传", self._upload_images, attempts=3,
-                    cancel_check=cancel_check,
-                )
-                self._checkpoint_auto_job(job, 4, "OSS 上传完成")
-                cancel_check()
-            if stage < 5:
-                cancel_check()
-                self._set_auto_progress(5, f"{offer_id}：填写当前类目属性")
-                self._retry_step(
-                    "类目属性填写", lambda: self._ai_fill_category_attributes(use_selected_category=True),
-                    attempts=3, delay_seconds=3, cancel_check=cancel_check,
-                )
-                self._ui_call(lambda: None)
-                self._checkpoint_auto_job(job, 5, "类目属性完成")
-                cancel_check()
-            if stage < 6:
-                cancel_check()
-                self._set_auto_progress(6, f"{offer_id}：校验并保存草稿")
-                job["draft_path"] = str(self._save_draft(notify=False))
-                self._checkpoint_auto_job(job, 6, "草稿校验完成")
-                cancel_check()
-            if stage < 7:
-                cancel_check()
-                self._set_auto_progress(7, f"{offer_id}：提交 Ozon、写入 RFBS 库存和 Excel 台账")
-                job["submitted_path"] = str(self._submit(notify=False, auto_progress=True, job_record=job))
-                self._checkpoint_auto_job(job, 7, "上架、库存和产品台账完成")
-                cancel_check()
+            if job["inputs"].get("wb_sync"):
+                # Capture Tk-owned settings before starting the independent WB worker.
+                settings, ai_config = self._ui_call(lambda: (self._wb_connection_settings(), self._analysis_config()))
+                snapshot = job["state"]
+                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="wb-listing") as executor:
+                    wb = executor.submit(self._sync_reviewed_wb_job, job, snapshot, settings, ai_config)
+                    self._finish_ozon_job(job, stage, offer_id, cancel_check)
+                    wb.result()
+            else:
+                self._finish_ozon_job(job, stage, offer_id, cancel_check)
             self._set_auto_progress(9, f"{offer_id}：自动上架完成")
         finally:
             self.auto_pipeline_running = False
+
+    def _finish_ozon_job(self, job, stage, offer_id, cancel_check):
+        if stage < 4:
+            cancel_check()
+            self._set_auto_progress(4, f"{offer_id}：上传图片到 OSS")
+            self._retry_step(
+                "OSS 图片上传", self._upload_images, attempts=3,
+                cancel_check=cancel_check,
+            )
+            self._checkpoint_auto_job(job, 4, "OSS 上传完成")
+            cancel_check()
+        if stage < 5:
+            cancel_check()
+            self._set_auto_progress(5, f"{offer_id}：填写当前类目属性")
+            self._retry_step(
+                "类目属性填写", lambda: self._ai_fill_category_attributes(use_selected_category=True),
+                attempts=3, delay_seconds=3, cancel_check=cancel_check,
+            )
+            self._ui_call(lambda: None)
+            self._checkpoint_auto_job(job, 5, "类目属性完成")
+            cancel_check()
+        if stage < 6:
+            cancel_check()
+            self._set_auto_progress(6, f"{offer_id}：校验并保存草稿")
+            job["draft_path"] = str(self._save_draft(notify=False))
+            self._checkpoint_auto_job(job, 6, "草稿校验完成")
+            cancel_check()
+        if stage < 7:
+            cancel_check()
+            self._set_auto_progress(7, f"{offer_id}：提交 Ozon、写入 RFBS 库存和 Excel 台账")
+            job["submitted_path"] = str(self._submit(notify=False, auto_progress=True, job_record=job))
+            self._checkpoint_auto_job(job, 7, "上架、库存和产品台账完成")
+            cancel_check()
 
     def _selected_job(self):
         selected = self.job_tree.selection()

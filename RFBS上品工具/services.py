@@ -747,12 +747,14 @@ class WbCardAiService:
         self, *, subject_id: int, subject_name: str,
         definitions: list[dict[str, Any]], image_paths: list[str],
         current_document: dict[str, Any], source_context: dict[str, Any] | None = None,
+        attributes_only: bool = False,
     ) -> dict[str, Any]:
         if not self.api_url or not self.api_key or not self.model:
             raise ValueError("请先在服务配置中填写支持图片输入的 AI 接口、密钥和模型")
         selected_paths = [str(path) for path in image_paths if str(path).strip()][:self.MAX_IMAGES]
-        if not selected_paths:
-            raise ValueError("AI 填写 WB 内容前，请先在“图片与库存”中选择至少一张商品图片")
+        variant = (current_document.get("variants") or [{}])[0]
+        if not selected_paths and not (variant.get("title") or variant.get("description") or (source_context or {}).get("source_reference")):
+            raise ValueError("请先填写商品标题、描述或选择商品图片")
         allowed: dict[int, dict[str, Any]] = {}
         simplified = []
         for item in definitions:
@@ -773,7 +775,7 @@ class WbCardAiService:
             raise ValueError("当前没有 WB API 返回的类目属性，请先点击“读取类目属性”")
 
         prompt = (
-            "Analyze all supplied product images and fill the editable Wildberries card JSON. "
+            "Use supplied product facts and any available images to fill the editable Wildberries card JSON. "
             "Return exactly one JSON object with subjectID and one item in variants, and no markdown. "
             "The variant may contain only vendorCode, title, description, brand, characteristics and sizes. "
             "Do not return dimensions: length, width, height and weight remain manual fields in the application. "
@@ -795,6 +797,8 @@ class WbCardAiService:
             + "\nCurrent editable card:\n" + json.dumps(current_document, ensure_ascii=False)
             + "\nSupplied source context:\n" + json.dumps(source_context or {}, ensure_ascii=False)[:20000]
         )
+        if attributes_only:
+            prompt += "\nThe Ozon copy is final. Return only subjectID and one variant with characteristics and evidence-supported sizes. Omit title, description and brand."
         content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         for index, path in enumerate(selected_paths, start=1):
             content.append({"type": "text", "text": f"PRODUCT IMAGE {index}"})

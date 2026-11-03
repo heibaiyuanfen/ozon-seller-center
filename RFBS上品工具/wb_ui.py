@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import re
 import shutil
@@ -9,6 +10,7 @@ import uuid
 import tkinter as tk
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from PIL import Image, ImageOps
 from tkinter import filedialog, messagebox, ttk
 
 from core import atomic_write_json, load_json
@@ -227,11 +229,11 @@ class WbUiMixin:
         pricing_entry("采购成本(CNY)", "wb_purchase_cost", 1, 0)
         pricing_entry("贴标费(CNY)", "wb_label_fee", 1, 2, "0")
         pricing_entry("目标利润率(%)", "wb_target_profit_margin_percent", 1, 4, "20")
-        pricing_entry("人工佣金(%)", "wb_sales_commission_percent", 1, 6)
-        pricing_entry("广告费率(%)", "wb_advertising_percent", 2, 0, "15")
-        pricing_entry("货损率(%)", "wb_cargo_loss_percent", 2, 2, "10")
-        self.wb_cny_rub_label, self.wb_cny_rub_entry = pricing_entry(
-            "1 CNY = RUB（仅海外仓）", "wb_cny_rub_rate", 2, 4, "12",
+        pricing_entry("人工佣金(%)", "wb_sales_commission_percent", 1, 6, "25")
+        pricing_entry("广告费率(%)", "wb_advertising_percent", 2, 0, "0")
+        pricing_entry("货损率(%)", "wb_cargo_loss_percent", 2, 2, "0")
+        pricing_entry(
+            "汇率（1 CNY 兑 RUB）", "wb_cny_rub_rate", 2, 4, "12",
         )
         pricing_entry("折扣(%)", "wb_discount", 2, 6, "0")
 
@@ -314,7 +316,7 @@ class WbUiMixin:
             tab, textvariable=self._var("wb_subject_display"), state="normal",
         )
         self.wb_subject_combo.grid(row=1, column=1, sticky="ew", padx=5, pady=4)
-        self.wb_subject_combo.bind("<<ComboboxSelected>>", self._wb_subject_selected)
+        self.wb_subject_combo.bind("<<ComboboxSelected>>", lambda _event: self._run(self._wb_load_characteristics))
         self.wb_subject_combo.bind("<Return>", lambda _event: self._run(self._wb_search_subjects))
         ttk.Button(
             tab, text="搜索/刷新", command=lambda: self._run(self._wb_search_subjects),
@@ -385,8 +387,8 @@ class WbUiMixin:
             json_toolbar, text="应用 JSON", command=self._wb_apply_content_json,
         ).pack(side=tk.LEFT, padx=5)
         ttk.Button(
-            json_toolbar, text="AI 根据图片填写",
-            command=lambda: self._run(self._wb_ai_fill_content),
+            json_toolbar, text="读取类目并用 AI 填写",
+            command=lambda: self._run(self._wb_read_and_fill_content),
         ).pack(side=tk.LEFT, padx=5)
         self.wb_content_json_status_var = tk.StringVar(
             value="先读取类目属性，再由 AI 按 WB API 返回的字段填写；所有结果均可人工复核",
@@ -611,6 +613,8 @@ class WbUiMixin:
         characteristics = self._wb_api_from_ui().subject_characteristics(subject_id)
 
         def update():
+            if self.vars["wb_subject_id"].get().strip() != str(subject_id):
+                return
             self.wb_characteristics = characteristics
             self.wb_characteristic_values = {
                 str(key): value for key, value in self.wb_characteristic_values.items()
@@ -816,7 +820,13 @@ class WbUiMixin:
         except Exception as error:
             messagebox.showerror("WB 内容 JSON 无法应用", str(error))
 
-    def _wb_ai_fill_content(self):
+    def _wb_read_and_fill_content(self):
+        subject_id = self._ui_call(self._wb_selected_subject_id)
+        vendor_code = self._ui_call(lambda: self.vars["wb_vendor_code"].get())
+        self._wb_load_characteristics()
+        self._wb_ai_fill_content(subject_id, vendor_code)
+
+    def _wb_ai_fill_content(self, expected_subject, expected_vendor):
         snapshot = self._ui_call(lambda: {
             "subject_id": self._wb_selected_subject_id(),
             "subject_name": self.vars["wb_subject_display"].get().strip(),
@@ -829,6 +839,9 @@ class WbUiMixin:
             },
             "config": self._analysis_config(),
         })
+        if (snapshot["subject_id"] != expected_subject or
+                snapshot["document"]["variants"][0]["vendorCode"] != expected_vendor.strip()):
+            raise ValueError("当前商品或类目已切换，请重新填写")
         service = WbCardAiService(**snapshot["config"])
         self._log(
             f"开始使用 {min(len(snapshot['image_paths']), service.MAX_IMAGES)} 张图片填写 WB 内容和类目属性",
@@ -846,11 +859,13 @@ class WbUiMixin:
         )
 
         def update():
+            if build_card_content_document(self._wb_content_form_inputs()) != snapshot["document"]:
+                raise ValueError("等待 AI 期间商品内容已变化，请重新填写")
             self._wb_apply_content_values(values, document)
             self.wb_status_var.set("WB 图片 AI 已填写内容；请重点核对红色必填属性和尺码")
 
         self._ui_call(update)
-        self._log("WB 图片 AI 填写完成，结果已写入可编辑 JSON")
+        self._log("WB AI 填写完成，结果已写入可编辑 JSON")
 
     def _wb_on_listing_mode_changed(self):
         if not hasattr(self, "wb_source_entry"):
@@ -981,11 +996,6 @@ class WbUiMixin:
         currency_code = "RUB" if mode == "overseas_warehouse" else "CNY"
         if hasattr(self, "wb_price_currency_var"):
             self.wb_price_currency_var.set(f"自动标价({currency_code})")
-        if hasattr(self, "wb_cny_rub_entry"):
-            if mode == "overseas_warehouse":
-                self.wb_cny_rub_entry.state(["!disabled"])
-            else:
-                self.wb_cny_rub_entry.state(["disabled"])
         if hasattr(self, "wb_cross_border_pricing"):
             if mode == "overseas_warehouse":
                 self.wb_cross_border_pricing.grid_remove()
@@ -1193,16 +1203,28 @@ class WbUiMixin:
 
     def _wb_copy_stable_images(self, image_paths: list[str], vendor_code: str) -> list[str]:
         safe_vendor = re.sub(r"[^A-Za-z0-9._-]+", "-", vendor_code).strip("-.") or "wb-product"
-        target = self.OUTPUT_DIR / "wb-products" / safe_vendor / time.strftime("%Y%m%d-%H%M%S")
+        target = self.OUTPUT_DIR / "wb-products" / safe_vendor / uuid.uuid4().hex
         target.mkdir(parents=True, exist_ok=True)
         copied = []
-        for index, raw_path in enumerate(image_paths, start=1):
+        for index, raw_path in enumerate(validate_image_paths(image_paths, check_resolution=False), start=1):
             source = Path(raw_path)
             suffix = source.suffix.casefold() or ".jpg"
             destination = target / f"{index:02d}{suffix}"
-            shutil.copy2(source, destination)
+            with Image.open(source) as image:
+                if image.width >= 700 and image.height >= 900:
+                    shutil.copy2(source, destination)
+                else:
+                    canvas_size = (max(700, min(image.width, 1600)), max(900, min(image.height, 2000)))
+                    oriented = ImageOps.exif_transpose(image).convert("RGBA")
+                    fitted = ImageOps.contain(oriented, canvas_size, Image.Resampling.LANCZOS)
+                    canvas = Image.new("RGB", canvas_size, "white")
+                    canvas.paste(fitted, ((canvas.width - fitted.width) // 2,
+                                          (canvas.height - fitted.height) // 2), fitted)
+                    destination = destination.with_suffix(".jpg")
+                    canvas.save(destination, quality=94)
+                    self._log(f"WB 图片已适配：{source.name} {image.width}×{image.height} → {canvas.width}×{canvas.height}")
             copied.append(str(destination))
-        return copied
+        return validate_image_paths(copied)
 
     def _confirm_wb_submit(self):
         if not self.vars["wb_token"].get().strip():
@@ -1233,7 +1255,7 @@ class WbUiMixin:
         inputs = self._ui_call(self._wb_collect_form_snapshot)
         selected_images = self._ui_call(lambda: list(self.wb_image_paths))
         self._wb_validate_listing_inputs(inputs, sandbox=settings["sandbox"])
-        validate_image_paths(selected_images)
+        validate_image_paths(selected_images, check_resolution=False)
         vendor_code = inputs["vendor_code"]
         state = self.wb_job if isinstance(self.wb_job, dict) else {}
         if state:
@@ -1304,6 +1326,68 @@ class WbUiMixin:
                 f"产品台账：{ledger['path']}",
             ))
         return result
+
+    def _sync_reviewed_wb_job(self, job, snapshot, settings, ai_config):
+        try:
+            self._advance_reviewed_wb_job(job, snapshot, settings, ai_config)
+        except Exception as error:
+            with self.auto_job_lock:
+                job["wb_error"] = str(error) or type(error).__name__
+                self._save_auto_jobs()
+            raise
+
+    def _advance_reviewed_wb_job(self, job, snapshot, settings, ai_config):
+        def save(state):
+            with self.auto_job_lock:
+                job["wb_state"] = copy.deepcopy(state)
+                job["wb_progress"] = state.get("message") or state["stage"]
+                self._save_auto_jobs()
+
+        with self.auto_job_lock:
+            job.pop("wb_error", None)
+            job["wb_progress"] = "准备商品资料和类目属性"
+            self._save_auto_jobs()
+        api = WildberriesApi(settings["token"], sandbox=settings["sandbox"])
+        state = copy.deepcopy(job.get("wb_state"))
+        if not state:
+            title = str(snapshot["fields"].get("title") or "").strip()
+            description = str(snapshot.get("description") or "").strip()
+            if not title or not description:
+                raise ValueError("Ozon 文案断点缺少标题或描述")
+            inputs = dict(job["inputs"]["wb_sync"])
+            subject = int(inputs["subject_id"])
+            definitions = api.subject_characteristics(subject)
+            inputs.update(vendor_code=job["inputs"]["offer_id"], title=title[:60],
+                          description=description[:5000],
+                          characteristic_definitions=definitions)
+            paths = self._wb_copy_stable_images(snapshot["local_images"], inputs["vendor_code"])
+            if definitions:
+                generated = WbCardAiService(**ai_config).generate(
+                    subject_id=subject, subject_name=inputs["subject"], definitions=definitions,
+                    image_paths=paths, current_document=build_card_content_document(inputs),
+                    source_context={"ozon_title": title, "reference": snapshot.get("reference"),
+                                    "vision_analysis": snapshot.get("vision_analysis")},
+                    attributes_only=True,
+                )
+                parsed = parse_card_content_document(generated, definitions, expected_subject_id=subject)
+                for key in ("characteristic_values", "tech_size", "wb_size"):
+                    inputs[key] = parsed.get(key)
+            build_card_payload(dict(inputs, barcode="preview"))
+            state = {"inputs": inputs, "stage": "new", "task_id": job["id"],
+                     "image_paths": paths}
+            save(state)
+        workflow = WbListingWorkflow(api, save_state=save, log=self._log)
+        while state["stage"] != "completed":
+            self._check_auto_job_cancelled(job)
+            workflow.advance(state)
+            if state["stage"] != "completed":
+                for _ in range(60):
+                    self._check_auto_job_cancelled(job)
+                    time.sleep(1)
+        if not state.get("ledger_completed"):
+            upsert_product_ledger(self.PRODUCT_LEDGER_PATH, self._wb_product_ledger_record(state))
+            state["ledger_completed"] = True
+            save(state)
 
     def _wb_product_ledger_record(self, state: dict) -> dict:
         inputs = state.get("inputs") or {}

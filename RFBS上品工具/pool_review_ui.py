@@ -1,4 +1,5 @@
 """First-version review UI and bridge to the existing listing queue."""
+from decimal import Decimal
 import copy
 import time
 import uuid
@@ -62,6 +63,127 @@ class PoolReviewMixin:
         self._save_product_pool()
         self._refresh_product_pool_tree()
 
+    def _review_wb_settings(self, window, items=None, tree=None):
+        defaults = tree is None
+        selected = [] if defaults else [items[int(key)] for key in tree.selection()]
+        if not defaults and not selected:
+            messagebox.showwarning("WB 同步", "请先选择审核行", parent=window)
+            return
+        dialog = tk.Toplevel(window)
+        dialog.title("选品池 WB 自动同步默认设置" if defaults else "选中商品的 WB 跨境同步设置")
+        previous = (self.pool_wb_defaults if defaults else self._effective_wb_settings(selected[0])) or {}
+        saved_id = str(previous.get("warehouse_id") or "")
+        saved_display = previous.get("warehouse_display") or saved_id
+        warehouses = {saved_display: saved_id} if saved_id else {}
+        fields = {}
+        for row, (key, label, default) in enumerate((
+            ("subject", "WB 子类目（输入关键词搜索）", ""),
+            ("target_profit_margin_percent", "目标利润率 %", "20"),
+            ("sales_commission_percent", "佣金 %", "25"),
+            ("advertising_percent", "广告费率 %", "0"),
+            ("cargo_loss_percent", "货损率 %", "0"),
+            ("label_fee", "贴标费 CNY", "0"),
+            ("warehouse_display", "WB 卖家仓库", saved_display),
+            ("stock", "WB 每件商品库存", "0"),
+        )):
+            ttk.Label(dialog, text=label).grid(row=row, column=0, sticky="w")
+            var = fields[key] = tk.StringVar(dialog, value=previous.get(key, default))
+            if key == "subject":
+                combo = ttk.Combobox(dialog, textvariable=var, width=36)
+                combo.grid(row=row, column=1)
+            elif key == "warehouse_display":
+                warehouse_combo = ttk.Combobox(dialog, textvariable=var, values=list(warehouses), state="readonly")
+                warehouse_combo.grid(row=row, column=1, sticky="ew")
+            else:
+                ttk.Entry(dialog, textvariable=var).grid(row=row, column=1, sticky="ew")
+        matches = {previous["subject"]: previous["subject_id"]} if previous else {}
+        def search():
+            query = fields["subject"].get().strip()
+            def fetch():
+                subjects = self._wb_api_from_ui().subjects(name=query)
+                def show():
+                    if dialog.winfo_exists():
+                        matches.clear()
+                        for item in subjects:
+                            sid, name = self._wb_subject_identity(item)
+                            matches[f"{name} [{sid}]"] = sid
+                        combo.configure(values=list(matches))
+                        combo.event_generate("<Down>")
+                self._ui_call(show)
+            self._run(fetch)
+        ttk.Button(dialog, text="搜索 WB 类目", command=search).grid(row=0, column=2)
+        def load_warehouses():
+            api = self._wb_api_from_ui()
+            if api.sandbox:
+                raise ValueError("请切换到 WB 正式环境后读取卖家仓库")
+            options = {f"{wh.get('name') or '未命名仓库'} [{wh['id']}]": str(wh["id"])
+                       for wh in api.warehouses() if wh.get("id")}
+            def show():
+                if not dialog.winfo_exists():
+                    return
+                current_id = warehouses.get(fields["warehouse_display"].get())
+                warehouses.clear()
+                warehouses.update(options)
+                warehouse_combo.configure(values=list(options))
+                match = next((name for name, wid in options.items() if wid == current_id), "")
+                fields["warehouse_display"].set(match or (next(iter(options)) if len(options) == 1 else ""))
+                if not options:
+                    messagebox.showinfo("WB 仓库", "当前店铺没有返回卖家仓库", parent=dialog)
+                elif len(options) > 1:
+                    warehouse_combo.event_generate("<Down>")
+            self._ui_call(show)
+        ttk.Button(dialog, text="读取 WB 仓库", command=lambda: self._run(load_warehouses)).grid(row=6, column=2)
+        def apply(enabled):
+            prices = {}
+            settings = {key: var.get().strip() for key, var in fields.items()}
+            try:
+                if enabled:
+                    settings["subject_id"] = matches[settings["subject"]]
+                    settings["warehouse_id"] = warehouses.get(settings["warehouse_display"], "")
+                    if not settings["warehouse_id"]:
+                        raise ValueError("请读取并选择 WB 仓库")
+                    if not settings["stock"].isascii() or not settings["stock"].isdigit():
+                        raise ValueError("WB 分配库存必须是大于或等于 0 的整数")
+                    if defaults:
+                        self._review_wb_inputs(dict(weight=100, depth=100, width=100, height=100, purchase_cost=1), settings)
+                    for item in selected:
+                        prices[id(item)] = self._review_wb_inputs(item, settings)["price"]
+            except (ArithmeticError, KeyError, ValueError) as error:
+                messagebox.showerror("请检查 WB 类目及核价参数", str(error), parent=dialog)
+                return
+            if defaults:
+                self.pool_wb_defaults = settings if enabled else {}
+                self._show_pool_wb_defaults()
+            for item in selected:
+                if enabled:
+                    item["wb_sync"] = dict(settings, review_price=prices[id(item)])
+                else:
+                    item["wb_sync"] = {}
+                tree.set(str(items.index(item)), "wb_price", prices.get(id(item), ""))
+                tree.set(str(items.index(item)), "wb", settings["subject"] if enabled else "关闭")
+            self._save_product_pool()
+            dialog.destroy()
+        ttk.Button(dialog, text="启用同步并保存", command=lambda: apply(True)).grid(row=8, column=1)
+        ttk.Button(dialog, text="关闭默认同步" if defaults else "关闭选中行同步", command=lambda: apply(False)).grid(row=8, column=0)
+
+    def _effective_wb_settings(self, item):
+        return item.get("wb_sync", getattr(self, "pool_wb_defaults", {})) or {}
+
+    def _show_pool_wb_defaults(self):
+        settings = self.pool_wb_defaults
+        self.pool_wb_status.set(
+            f"{settings['subject']} · {settings['warehouse_display']} · 每件库存 {settings['stock']}"
+            if settings else "默认关闭"
+        )
+
+    def _review_wb_inputs(self, item, settings):
+        values = dict(settings, fulfillment_mode="cross_border", purchase_cost=item.get("purchase_cost"))
+        for source, target, divisor in (("weight","weight_kg",1000), ("depth","length_cm",10),
+                                        ("width","width_cm",10), ("height","height_cm",10)):
+            values[target] = str(Decimal(str(item.get(source))) / divisor)
+        price = self._wb_calculate_pricing(values)
+        return dict(values, price=str(price.list_price), pricing_breakdown=price.json_values())
+
     def _review_pool_selection(self):
         items = self._selected_pool_items()
         if not items:
@@ -75,9 +197,9 @@ class PoolReviewMixin:
         window.geometry("1150x620")
         ttk.Label(window, text=f"核价：{'FBP' if fbp else 'RFBS'}；售价按每件商品的成本和目标 ROI 自动计算。双击商品可编辑，审核后需刷新。",
                   wraplength=1100).pack(fill=tk.X, padx=12, pady=8)
-        columns = ("sku", "price", "price_rub", "cost", "profit", "roi", "margin", "status", "reason")
+        columns = ("sku", "price", "price_rub", "cost", "profit", "roi", "margin", "status", "wb", "wb_price", "reason")
         tree = ttk.Treeview(window, columns=columns, show="headings", selectmode="extended")
-        for key, label, width in zip(columns, ("来源SKU", "自动售价 CNY", "自动售价 RUB", "到手成本 CNY", "单件利润 CNY", "ROI%", "销售利润率%", "审核状态", "说明"), (110, 110, 130, 110, 110, 70, 100, 80, 350)):
+        for key, label, width in zip(columns, ("来源SKU", "自动售价 CNY", "自动售价 RUB", "到手成本 CNY", "单件利润 CNY", "ROI%", "销售利润率%", "审核状态", "WB 同步类目", "WB 售价 CNY", "说明"), (110, 110, 130, 110, 110, 70, 100, 80, 150, 100, 350)):
             tree.heading(key, text=label)
             tree.column(key, width=width, stretch=key == "reason")
         tree.pack(fill=tk.BOTH, expand=True, padx=12)
@@ -87,7 +209,12 @@ class PoolReviewMixin:
         for index, item in enumerate(items):
             result = evaluate_product(item, rules, fbp=fbp, exchange_rate=exchange_rate)
             item["review_result"] = {**result, "reviewed_at": time.strftime("%Y-%m-%d %H:%M:%S"), "rules": dict(rules), "fbp": fbp, "exchange_rate": exchange_rate}
-            tree.insert("", tk.END, iid=str(index), values=(item.get("sku"), result["price"], result["price_rub"], item.get("purchase_cost"), result["profit"], result["roi"], result["margin"], result["status"], result["reason"]))
+            wb = self._effective_wb_settings(item)
+            try:
+                wb_price = self._review_wb_inputs(item, wb)["price"] if wb else ""
+            except (ValueError, ArithmeticError):
+                wb_price = "待补资料"
+            tree.insert("", tk.END, iid=str(index), values=(item.get("sku"), result["price"], result["price_rub"], item.get("purchase_cost"), result["profit"], result["roi"], result["margin"], result["status"], wb.get("subject", "关闭"), wb_price, result["reason"]))
         self._save_product_pool()
         def edit(_event=None):
             if tree.selection():
@@ -104,6 +231,7 @@ class PoolReviewMixin:
                 if url.startswith(('https://www.ozon.ru/', 'https://ozon.ru/')):
                     webbrowser.open(url)
         ttk.Button(window, text='打开选中商品链接', command=open_product).pack(side=tk.LEFT, padx=8, pady=10)
+        ttk.Button(window, text="设置选中行 WB 同步", command=lambda: self._review_wb_settings(window, items, tree)).pack(side=tk.LEFT)
         def enqueue():
             chosen = [items[int(key)] for key in tree.selection()]
             if not chosen:
@@ -149,7 +277,11 @@ class PoolReviewMixin:
             if not inputs["offer_id"]:
                 inputs["offer_id"] = (offer_ids or {}).get(source_identity(item)) or self._new_offer_id()
             group = time.strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
-            for target in self._expand_job_inputs_for_shops(inputs, group):
+            targets = list(self._expand_job_inputs_for_shops(inputs, group))
+            wb = self._effective_wb_settings(item)
+            if wb:
+                targets[0]["wb_sync"] = self._review_wb_inputs(item, wb)
+            for target in targets:
                 identity = (source_identity(item), target["ozon_shop_id"])
                 offer = (target["offer_id"], target["ozon_shop_id"])
                 if identity in identities or offer in offers:

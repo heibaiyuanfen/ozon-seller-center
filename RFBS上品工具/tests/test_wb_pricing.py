@@ -26,6 +26,19 @@ class WbPricingTests(unittest.TestCase):
         self.assertEqual(billable, Decimal("3.1"))
         self.assertEqual(shipping, Decimal("141.3"))
 
+    def test_cross_border_spreadsheet_example(self):
+        result = calculate_wb_price(
+            fulfillment_mode="cross_border", purchase_cost_cny="6.30", label_fee_cny=0,
+            target_profit_margin_percent=30, sales_commission_percent=25,
+            advertising_percent=0, cargo_loss_percent=0, cny_rub_rate=0,
+            weight_kg="0.32", length_cm=10, width_cm=10, height_cm=10,
+        )
+        self.assertEqual(result.billable_weight_kg, Decimal("0.4"))
+        self.assertEqual(result.cross_border_shipping_cny, Decimal("25.20"))
+        self.assertEqual(result.list_price, 70)
+        self.assertEqual(result.sales_commission, Decimal("17.50"))
+        self.assertEqual(result.profit, 21)
+
     def test_official_tail_delivery_volume_bands(self):
         tail, volume = calculate_wb_tail_delivery_rub("10", "10", "5.5")
         self.assertEqual(volume, Decimal("0.55"))

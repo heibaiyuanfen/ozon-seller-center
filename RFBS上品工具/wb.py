@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import time
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable
 
@@ -442,7 +442,11 @@ def build_card_payload(inputs: dict[str, Any]) -> list[dict[str, Any]]:
         raise ValueError("请选择有效的 WB 子类目")
     vendor_code = str(inputs.get("vendor_code") or "").strip()
     title = str(inputs.get("title") or "").strip()
-    description = str(inputs.get("description") or "").strip()
+    # WB rejects these decorative markers in descriptions reused from Ozon.
+    description = str(inputs.get("description") or "")
+    for marker in ("🎯", "✅", "🔹", "🧼"):
+        description = description.replace(marker + "\ufe0f", " ").replace(marker, " ")
+    description = description.strip()
     barcode = str(inputs.get("barcode") or "").strip()
     if not vendor_code:
         raise ValueError("请填写 WB 卖家货号")
@@ -480,12 +484,11 @@ def build_card_payload(inputs: dict[str, Any]) -> list[dict[str, Any]]:
             "value": parse_characteristic_value(raw_value, definition.get("charcType", 0)),
         })
 
-    dimensions = {
-        "length": float(_decimal(inputs.get("length_cm"), "WB 包装长度")),
-        "width": float(_decimal(inputs.get("width_cm"), "WB 包装宽度")),
-        "height": float(_decimal(inputs.get("height_cm"), "WB 包装高度")),
-        "weightBrutto": float(_decimal(inputs.get("weight_kg"), "WB 包装重量")),
-    }
+    dimensions = {}
+    for key, label in (("length", "长度"), ("width", "宽度"), ("height", "高度")):
+        cm = _decimal(inputs.get(key + "_cm"), "WB 包装" + label)
+        dimensions[key] = int(cm.to_integral_value(rounding=ROUND_CEILING))
+    dimensions["weightBrutto"] = float(_decimal(inputs.get("weight_kg"), "WB 包装重量"))
     size = {"skus": [barcode]}
     tech_size = str(inputs.get("tech_size") or "").strip()
     wb_size = str(inputs.get("wb_size") or "").strip()
@@ -507,7 +510,7 @@ def build_card_payload(inputs: dict[str, Any]) -> list[dict[str, Any]]:
     return [{"subjectID": subject_id, "variants": [variant]}]
 
 
-def validate_image_paths(image_paths) -> list[str]:
+def validate_image_paths(image_paths, *, check_resolution=True) -> list[str]:
     paths = [Path(path) for path in image_paths if str(path).strip()]
     if not paths:
         raise ValueError("请至少选择 1 张 WB 商品图片")
@@ -523,7 +526,7 @@ def validate_image_paths(image_paths) -> list[str]:
             raise ValueError("WB 单张图片不能超过 32 MB：" + path.name)
         with Image.open(path) as image:
             width, height = image.size
-        if width < 700 or height < 900:
+        if check_resolution and (width < 700 or height < 900):
             raise ValueError(
                 f"WB 图片最低分辨率为 700×900：{path.name} 当前为 {width}×{height}"
             )

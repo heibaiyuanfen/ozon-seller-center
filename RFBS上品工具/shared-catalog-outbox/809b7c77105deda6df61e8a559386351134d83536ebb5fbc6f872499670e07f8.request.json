@@ -1,0 +1,30 @@
+{
+  "target": "https://erp.wxzwxz.xyz",
+  "product": {
+    "source": "ozon-seller-center",
+    "external_id": "83d98107b262ea76101d2f91bdda776c9c2da8d94e212f02ba284a9aaf50c778",
+    "sku": "AUTO-20261103-8FB1DD66716A4CD2",
+    "name": "Кофр для хранения вещей 45x15x35 см 1 шт с крышкой бежевый",
+    "variants": [
+      {
+        "sku": "AUTO-20261103-8FB1DD66716A4CD2",
+        "specification": "AUTO-20261103-8FB1DD66716A4CD2",
+        "purchase_price_cny": 15.0,
+        "package_length_mm": 450.0,
+        "package_width_mm": 150.0,
+        "package_height_mm": 350.0,
+        "weight_grams": 500.0,
+        "images": [
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-03/AUTO-20261103-8FB1DD66716A4CD2/AUTO-20261103-8FB1DD66716A4CD2%E4%B8%BB%E5%9B%BE.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-03/AUTO-20261103-8FB1DD66716A4CD2/%E9%99%84%E5%9B%BE%281%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-03/AUTO-20261103-8FB1DD66716A4CD2/%E9%99%84%E5%9B%BE%282%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-03/AUTO-20261103-8FB1DD66716A4CD2/%E9%99%84%E5%9B%BE%283%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-03/AUTO-20261103-8FB1DD66716A4CD2/%E9%99%84%E5%9B%BE%284%29.jpg"
+        ]
+      }
+    ],
+    "source_url": "https://detail.1688.com/offer/963931298702.html",
+    "description_category_id": 17027937,
+    "type_id": 971078631
+  }
+}
