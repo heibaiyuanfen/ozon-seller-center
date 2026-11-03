@@ -785,7 +785,7 @@ class WbCardAiService:
             "techSize is the seller's real size label, such as S or 42. wbSize is Wildberries' standardized display "
             "size. Fill them only for a genuinely sized product when supported by the supplied evidence. For a "
             "product without size, keep one sizes object with skus only and omit techSize and wbSize. "
-            "For characteristics, use only IDs from live_characteristics. Never invent or alter an ID. Attribute "
+            "For characteristics, use only IDs from live_characteristics. Never invent or alter an ID. For arrays, respect positive maxCount and put the best-supported values first. Attribute "
             "values must follow the listed type and be suitable for the WB API; ordinary text characteristics use "
             "arrays of concise Russian strings, and numeric type 4 uses a JSON number. Fill a field only when it is "
             "supported by a visible fact or supplied source/current data. Never guess dimensions, weight, material, "

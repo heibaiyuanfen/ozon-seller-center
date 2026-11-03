@@ -479,10 +479,11 @@ def build_card_payload(inputs: dict[str, Any]) -> list[dict[str, Any]]:
         except ValueError as error:
             raise ValueError(f"WB 属性 ID 无效：{charc_id}") from error
         definition = definition_by_id.get(charc_id, {})
-        characteristics.append({
-            "id": numeric_id,
-            "value": parse_characteristic_value(raw_value, definition.get("charcType", 0)),
-        })
+        value = parse_characteristic_value(raw_value, definition.get("charcType", 0))
+        maximum = int(definition.get("maxCount") or 0)
+        if isinstance(value, list) and maximum > 0:
+            value = value[:maximum]
+        characteristics.append({"id": numeric_id, "value": value})
 
     dimensions = {}
     for key, label in (("length", "长度"), ("width", "宽度"), ("height", "高度")):
