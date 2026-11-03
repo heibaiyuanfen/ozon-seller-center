@@ -1,12 +1,12 @@
 {
-  "ok": null,
+  "ok": false,
   "job": {
     "id": "20261103144238-6f66e44b-483718",
     "created_at": "2026-11-03 14:42:37",
-    "updated_at": "2026-11-03 14:48:49",
-    "status": "running",
+    "updated_at": "2026-11-03 15:15:57",
+    "status": "failed",
     "stage": 6,
-    "failed_stage": 0,
+    "failed_stage": 7,
     "inputs": {
       "shipping_exchange_rate": "12.5",
       "image_mode": "original",
@@ -922,8 +922,8 @@
       "attributes_json": "[\n  {\n    \"complex_id\": 0,\n    \"id\": 8513,\n    \"values\": [\n      {\n        \"value\": \"2\"\n      }\n    ],\n    \"_name\": \"每包数量,pcs\",\n    \"_source\": \"AI映射页面事实：В параметрах указано: единиц в одном товаре — 2.\"\n  },\n  {\n    \"complex_id\": 0,\n    \"id\": 8416,\n    \"values\": [\n      {\n        \"value\": \"28\"\n      }\n    ],\n    \"_name\": \"宽度，厘米\",\n    \"_source\": \"Ширина, см\"\n  },\n  {\n    \"complex_id\": 0,\n    \"id\": 4180,\n    \"values\": [\n      {\n        \"value\": \"Набор коробов для хранения 2 шт\"\n      }\n    ],\n    \"_name\": \"名称\",\n    \"_source\": \"生成文案\"\n  },\n  {\n    \"complex_id\": 0,\n    \"id\": 4383,\n    \"values\": [\n      {\n        \"value\": \"260.0\"\n      }\n    ],\n    \"_name\": \"商品重量，克\",\n    \"_source\": \"自动工作台：商品净重\"\n  },\n  {\n    \"complex_id\": 0,\n    \"id\": 10096,\n    \"values\": [\n      {\n        \"value\": \"米色\",\n        \"dictionary_value_id\": 61573\n      }\n    ],\n    \"_name\": \"商品颜色\",\n    \"_source\": \"AI选择 + Ozon实时字典校验\"\n  },\n  {\n    \"complex_id\": 0,\n    \"id\": 23171,\n    \"values\": [\n      {\n        \"value\": \"#кофр_для_хранения_вещей #короб_для_хранения_вещей #коробка_для_хранения_вещей #органайзер_для_хранения_вещей #контейнер_для_хранения_вещей #короб_для_хранения_одежды #кофр_для_одежды #органайзер_для_одежды #складной_кофр #складной_короб #короб_с_ручками #кофр_с_ручками #короб_для_гардеробной #органайзер_для_прихожей #хранение_вещей_в_спальне #органайзер_для_обуви #короб_для_обуви #органайзер_для_белья #короб_для_нижнего_белья #органайзер_для_сумок #короб_для_головных_уборов #органайзер_для_косметики #короб_для_мелочей #органайзер_для_заколок #органайзер_для_очков #органайзер_для_маникюра #короб_из_нетканого_материала #кофр_из_нетканого_материала\"\n      }\n    ],\n    \"_name\": \"#主题标签\",\n    \"_source\": \"生成文案\"\n  },\n  {\n    \"complex_id\": 0,\n    \"id\": 9048,\n    \"values\": [\n      {\n        \"value\": \"AUTO-20261103-1352880F4A564F4B\"\n      }\n    ],\n    \"_name\": \"型号名称（针对合并为一张商品卡片）\",\n    \"_source\": \"人工填写：型号名称（合并多变体）\"\n  },\n  {\n    \"complex_id\": 0,\n    \"id\": 10400,\n    \"values\": [\n      {\n        \"value\": \"1 年\",\n        \"dictionary_value_id\": 970716397\n      }\n    ],\n    \"_name\": \"保证\",\n    \"_source\": \"系统默认：保证 1 年（Ozon 实时字典）\"\n  },\n  {\n    \"complex_id\": 0,\n    \"id\": 85,\n    \"values\": [\n      {\n        \"value\": \"Нет бренда\",\n        \"dictionary_value_id\": 126745801\n      }\n    ],\n    \"_name\": \"品牌\",\n    \"_source\": \"系统锁定：无品牌\"\n  },\n  {\n    \"complex_id\": 0,\n    \"id\": 4389,\n    \"values\": [\n      {\n        \"value\": \"中国\",\n        \"dictionary_value_id\": 90296\n      }\n    ],\n    \"_name\": \"原产国\",\n    \"_source\": \"系统默认：原产国 中国（Ozon 实时字典）\"\n  },\n  {\n    \"complex_id\": 0,\n    \"id\": 11650,\n    \"values\": [\n      {\n        \"value\": \"1\"\n      }\n    ],\n    \"_name\": \"原厂包装数量\",\n    \"_source\": \"系统默认：原厂包装数量 1\"\n  },\n  {\n    \"complex_id\": 0,\n    \"id\": 8415,\n    \"values\": [\n      {\n        \"value\": \"48\"\n      }\n    ],\n    \"_name\": \"长度，厘米\",\n    \"_source\": \"Длина, см\"\n  },\n  {\n    \"complex_id\": 0,\n    \"id\": 4191,\n    \"values\": [\n      {\n        \"value\": \"Описание Набор коробов для хранения вещей от бренда defender - это стильное и практичное решение для хранения вещей в любом помещении. Изготовленный из прочного нетканого материала, он отличается легкостью и компактностью, что позволяет удобно разместить его в гардеробной, прихожей или спальне. Коробка оснащена удобными ручками для переноски и складной конструкцией, что упрощает хранение, когда она не используется. Вместительный размер 48*28*25 см позволяет хранить в ней все необходимое: от домашнего текстиля до различных мелочей. Благодаря нейтральному бежевому цвету и отсутствию рисунка, короб гармонично впишется в любой интерьер, добавляя ему функциональности и порядка.\"\n      }\n    ],\n    \"_name\": \"简介\",\n    \"_source\": \"生成文案\"\n  },\n  {\n    \"complex_id\": 0,\n    \"id\": 8962,\n    \"values\": [\n      {\n        \"value\": \"1\"\n      }\n    ],\n    \"_name\": \"一个商品中的件数\",\n    \"_source\": \"系统默认：一个商品中的件数 1\"\n  },\n  {\n    \"complex_id\": 0,\n    \"id\": 6383,\n    \"values\": [\n      {\n        \"value\": \"无纺布\",\n        \"dictionary_value_id\": 61972\n      }\n    ],\n    \"_name\": \"材料\",\n    \"_source\": \"AI选择 + Ozon实时字典校验\"\n  },\n  {\n    \"complex_id\": 0,\n    \"id\": 8229,\n    \"values\": [\n      {\n        \"value\": \"收纳袋\",\n        \"dictionary_value_id\": 971078631\n      }\n    ],\n    \"_name\": \"类型\",\n    \"_source\": \"AI选择 + Ozon实时字典校验\"\n  }\n]",
       "complex_attributes_json": "[]"
     },
-    "error": "",
-    "message": "WB 新卡片仍在同步价格和仓库服务；约 27 分钟后点击“继续当前任务”",
+    "error": "商品尚未在库存系统中就绪：{\"warehouse_id\": 1020005032600610, \"product_id\": 6839006062, \"offer_id\": \"AUTO-20261103-1352880F4A564F4B\", \"updated\": false, \"errors\": [{\"code\": \"NOT_PASS_MODERATION\", \"message\": \"Product is not moderated\"}]}",
+    "message": "点击“修复选中任务”修改后继续",
     "task_id": 5955991561,
     "import_completed": true,
     "stock_completed": false,
@@ -932,8 +932,8 @@
     "prefetch_status": "deferred",
     "prefetch_error": "403 Client Error: Forbidden for url: https://www.ozon.ru/product/3424797454?__rr=1",
     "step_started_at": 1793688333.2530577,
-    "heartbeat_at": 1793688574.1471221,
-    "wb_progress": "WB 新卡片仍在同步价格和仓库服务；约 27 分钟后点击“继续当前任务”",
+    "heartbeat_at": 1793690158.1339958,
+    "wb_progress": "WB 商品上架流程完成，库存已写入",
     "wb_state": {
       "inputs": {
         "subject": "收纳盒 [783]",
@@ -1452,7 +1452,7 @@
         "wb_size": "",
         "barcode": "2060598963444"
       },
-      "stage": "media_uploaded",
+      "stage": "completed",
       "task_id": "20261103144238-6f66e44b-483718",
       "image_paths": [
         "D:\\OZON 跟卖软件\\新建文件夹\\新建文件夹 (2)\\RFBS上品工具\\输出\\wb-products\\AUTO-20261103-1352880F4A564F4B\\56dbd34fa0b044aba4ed96c387cbcc28\\01.jpg",
@@ -1461,9 +1461,9 @@
         "D:\\OZON 跟卖软件\\新建文件夹\\新建文件夹 (2)\\RFBS上品工具\\输出\\wb-products\\AUTO-20261103-1352880F4A564F4B\\56dbd34fa0b044aba4ed96c387cbcc28\\04.jpg",
         "D:\\OZON 跟卖软件\\新建文件夹\\新建文件夹 (2)\\RFBS上品工具\\输出\\wb-products\\AUTO-20261103-1352880F4A564F4B\\56dbd34fa0b044aba4ed96c387cbcc28\\05.jpg"
       ],
-      "status": "waiting",
+      "status": "completed",
       "error": "",
-      "updated_at": "2026-11-03 14:48:49",
+      "updated_at": "2026-11-03 15:15:57",
       "payload": [
         {
           "subjectID": 783,
@@ -1528,10 +1528,13 @@
       ],
       "submitted_at": "2026-11-03 14:44:58",
       "submitted_at_epoch": 1793688298.2282963,
-      "message": "WB 新卡片仍在同步价格和仓库服务；约 27 分钟后点击“继续当前任务”",
+      "message": "WB 商品上架流程完成，库存已写入",
       "nm_id": 2109674717,
       "chrt_id": 3713122632,
-      "uploaded_image_count": 5
+      "uploaded_image_count": 5,
+      "price_upload_id": 138752992,
+      "stock_written": true,
+      "ledger_completed": true
     },
     "draft_path": "D:\\OZON 跟卖软件\\新建文件夹\\新建文件夹 (2)\\RFBS上品工具\\输出\\draft-AUTO-20261103-1352880F4A564F4B.json",
     "card_diagnostics": [],
@@ -1562,5 +1565,7 @@
       "cargo_loss": "0.59",
       "profit": "5.53"
     }
-  }
+  },
+  "error": "商品尚未在库存系统中就绪：{\"warehouse_id\": 1020005032600610, \"product_id\": 6839006062, \"offer_id\": \"AUTO-20261103-1352880F4A564F4B\", \"updated\": false, \"errors\": [{\"code\": \"NOT_PASS_MODERATION\", \"message\": \"Product is not moderated\"}]}",
+  "traceback": "Traceback (most recent call last):\n  File \"D:\\OZON 跟卖软件\\新建文件夹\\新建文件夹 (2)\\RFBS上品工具\\parallel_worker.py\", line 72, in run_parallel_job\n    app._run_auto_job(job)\n  File \"D:\\OZON 跟卖软件\\新建文件夹\\新建文件夹 (2)\\RFBS上品工具\\app.py\", line 3397, in _run_auto_job\n    self._finish_ozon_job(job, stage, offer_id, cancel_check)\n  File \"D:\\OZON 跟卖软件\\新建文件夹\\新建文件夹 (2)\\RFBS上品工具\\app.py\", line 3434, in _finish_ozon_job\n    job[\"submitted_path\"] = str(self._submit(notify=False, auto_progress=True, job_record=job))\n                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"D:\\OZON 跟卖软件\\新建文件夹\\新建文件夹 (2)\\RFBS上品工具\\app.py\", line 7118, in _submit\n    return self._submit_registered(notify, auto_progress, job_record)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"D:\\OZON 跟卖软件\\新建文件夹\\新建文件夹 (2)\\RFBS上品工具\\app.py\", line 7189, in _submit_registered\n    stock_result = self._retry_step(\n                   ^^^^^^^^^^^^^^^^^\n  File \"D:\\OZON 跟卖软件\\新建文件夹\\新建文件夹 (2)\\RFBS上品工具\\app.py\", line 2364, in _retry_step\n    return operation()\n           ^^^^^^^^^^^\n  File \"D:\\OZON 跟卖软件\\新建文件夹\\新建文件夹 (2)\\RFBS上品工具\\app.py\", line 7191, in <lambda>\n    lambda: api.update_stock(item[\"offer_id\"], warehouse_id, stock),\n            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"D:\\OZON 跟卖软件\\新建文件夹\\新建文件夹 (2)\\RFBS上品工具\\services.py\", line 304, in update_stock\n    raise RuntimeError(\"商品尚未在库存系统中就绪：\" + detail)\nRuntimeError: 商品尚未在库存系统中就绪：{\"warehouse_id\": 1020005032600610, \"product_id\": 6839006062, \"offer_id\": \"AUTO-20261103-1352880F4A564F4B\", \"updated\": false, \"errors\": [{\"code\": \"NOT_PASS_MODERATION\", \"message\": \"Product is not moderated\"}]}\n"
 }
