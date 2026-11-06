@@ -190,6 +190,12 @@ class WildberriesApi:
         )
         return data if isinstance(data, dict) else {}
 
+    def merge_cards(self, target_imt: int, nm_ids: list[int]):
+        if not nm_ids or len(nm_ids) > 30:
+            raise ValueError("合并商品数量必须在 1 到 30 之间")
+        return self._request("POST", self.content_url + "/content/v2/cards/moveNm",
+                             json_body={"targetIMT": int(target_imt), "nmIDs": list(map(int, nm_ids))})
+
     def cards_by_text(self, text: str) -> list[dict[str, Any]]:
         data = self._request(
             "POST", self.content_url + "/content/v2/get/cards/list",
@@ -293,7 +299,42 @@ class WildberriesApi:
         data = self._request("GET", self.MARKETPLACE_URL + "/api/v3/warehouses")
         return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
 
+    def get_stocks(self, warehouse_id: int, chrt_ids: list[int]) -> dict[int, int]:
+        if self.sandbox:
+            raise ValueError("Sandbox 不读取真实仓库库存")
+        result = {}
+        ids = list(dict.fromkeys(int(value) for value in chrt_ids))
+        for offset in range(0, len(ids), 1000):
+            data = self._request("POST", self.MARKETPLACE_URL + f"/api/v3/stocks/{int(warehouse_id)}",
+                                 json_body={"chrtIds": ids[offset:offset + 1000]})
+            for item in data.get("stocks", []):
+                result[int(item["chrtId"])] = int(item["amount"])
+        return result
+
+    @staticmethod
+    def color_update_payload(card, color_id, color):
+        import copy
+        required = ("nmID", "vendorCode", "sizes", "characteristics", "dimensions")
+        if any(key not in card for key in required) or not card["sizes"]:
+            raise ValueError("商品资料不完整，不能安全修改颜色，请重新读取")
+        result = {key: copy.deepcopy(card[key]) for key in (
+            "nmID", "vendorCode", "title", "description", "brand", "dimensions", "sizes",
+            "characteristics", "documents", "excludeDocuments") if key in card}
+        result["characteristics"] = [{"id": item["id"], "value": copy.deepcopy(item["value"])}
+                                     for item in card["characteristics"] if int(item["id"]) != int(color_id)]
+        result["characteristics"].append({"id": int(color_id), "value": [color]})
+        result["sizes"] = [{key: copy.deepcopy(size[key]) for key in ("chrtID", "techSize", "wbSize", "skus") if key in size}
+                           for size in card["sizes"]]
+        return result
+
+    def update_card(self, payload):
+        return self._request("POST", self.content_url + "/content/v2/cards/update", json_body=[payload])
+
     def update_stock(self, warehouse_id: int, chrt_id: int, amount: int):
+        if isinstance(amount, bool) or not str(amount).isdigit() or int(amount) < 0:
+            raise ValueError("库存必须是大于或等于 0 的整数")
+        if int(warehouse_id) <= 0 or int(chrt_id) <= 0:
+            raise ValueError("仓库和尺码 ID 必须大于 0")
         if self.sandbox:
             return {}
         return self._request(
@@ -508,6 +549,16 @@ def build_card_payload(inputs: dict[str, Any]) -> list[dict[str, Any]]:
     brand = str(inputs.get("brand") or "").strip()
     if brand:
         variant["brand"] = brand
+    if inputs.get("size_variants"):
+        variant["sizes"] = []
+        seen = set()
+        for row in inputs["size_variants"]:
+            name = str(row.get("tech_size") or "").strip()
+            if not name or name in seen:
+                raise ValueError("尺码不能为空或重复")
+            seen.add(name)
+            variant["sizes"].append({"techSize": name, "wbSize": row.get("wb_size") or "",
+                                     "skus": [row.get("barcode") or barcode]})
     return [{"subjectID": subject_id, "variants": [variant]}]
 
 
@@ -581,6 +632,16 @@ class WbListingWorkflow:
         identity = self._card_identity(card)
         if not identity:
             return False
+        rows = (state.get("inputs") or {}).get("size_variants") or []
+        if rows:
+            mapped = []
+            for row in rows:
+                match = next((size for size in card.get("sizes", [])
+                              if row.get("barcode") in (size.get("skus") or [])), None)
+                if not match or not match.get("chrtID"):
+                    return False
+                mapped.append(dict(row, chrt_id=int(match["chrtID"])))
+            state["size_variants"] = mapped
         state["nm_id"], state["chrt_id"] = identity
         state["stage"] = "card_ready"
         state["status"] = "running"
@@ -616,6 +677,9 @@ class WbListingWorkflow:
                         raise RuntimeError("WB 条码接口没有返回可用条码")
                     inputs["barcode"] = barcodes[0]
                     state["inputs"] = inputs
+                for row in inputs.get("size_variants") or []:
+                    if not row.get("barcode"):
+                        row["barcode"] = self.api.generate_barcodes(1)[0]
                 payload = build_card_payload(inputs)
                 state["payload"] = payload
                 state["stage"] = "card_submitted"
@@ -728,7 +792,11 @@ class WbListingWorkflow:
                     raise ValueError("WB 仓库 ID 和库存必须是整数") from error
                 if warehouse_id <= 0 or stock < 0:
                     raise ValueError("WB 仓库 ID 必须大于 0，库存不能小于 0")
-                self.api.update_stock(warehouse_id, state["chrt_id"], stock)
+                if state.get("size_variants"):
+                    for row in state["size_variants"]:
+                        self.api.update_stock(warehouse_id, row["chrt_id"], int(row["stock"]))
+                else:
+                    self.api.update_stock(warehouse_id, state["chrt_id"], stock)
                 state["stock_written"] = True
             state["stage"] = "completed"
             state["status"] = "completed"

@@ -211,7 +211,13 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
 
     @staticmethod
     def _job_price_breakdown(values: dict):
-        weight_kg = Decimal(str(values.get("weight") or "").strip()) / Decimal("1000")
+        try:
+            weight = Decimal(str(values.get("weight") or "").strip())
+        except (InvalidOperation, ValueError) as error:
+            raise ValueError("包装毛重必须填写有效数字，单位为克，请检查当前及其它变体") from error
+        if not weight.is_finite() or weight <= 0:
+            raise ValueError("包装毛重必须大于 0，单位为克")
+        weight_kg = weight / Decimal("1000")
         fbp_pricing = RfbsListingApp._fbp_pricing_enabled(values)
         return calculate_roi_price(
             values.get("purchase_cost", ""),

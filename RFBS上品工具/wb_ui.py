@@ -10,7 +10,7 @@ import uuid
 import tkinter as tk
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageTk
 from tkinter import filedialog, messagebox, ttk
 
 from core import atomic_write_json, load_json
@@ -28,7 +28,11 @@ from wb_source import (
 )
 
 
-class WbUiMixin:
+from wb_inventory import WbInventoryMixin
+from wb_product_editor import WbProductEditorMixin
+
+
+class WbUiMixin(WbInventoryMixin, WbProductEditorMixin):
     """Wildberries UI and resumable listing workflow for ``RfbsListingApp``."""
 
     def _initialize_wb_state(self):
@@ -84,6 +88,7 @@ class WbUiMixin:
         self._build_wb_product_tab(product_tab)
         self._build_wb_category_tab(category_tab)
         self._build_wb_media_tab(media_tab)
+        self._build_wb_variants_tab()
         self._wb_on_listing_mode_changed()
         self._wb_on_fulfillment_mode_changed()
 
@@ -107,6 +112,536 @@ class WbUiMixin:
         ttk.Button(status, text="重置当前任务", command=self._reset_wb_job).grid(
             row=0, column=2, rowspan=2, padx=(10, 0), sticky="ns",
         )
+
+        log_frame = ttk.Frame(status)
+        log_frame.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        self.wb_task_log_text = tk.Text(log_frame, height=4, wrap="word", state="disabled")
+        self.wb_task_log_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        log_scroll = ttk.Scrollbar(log_frame, command=self.wb_task_log_text.yview)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.wb_task_log_text.configure(yscrollcommand=log_scroll.set)
+        details = ttk.Frame(self.wb_product_tabs, padding=8)
+        self.wb_product_tabs.add(details, text="5. 任务流程")
+        ttk.Label(details, text="读取资料 → AI 文案与属性 → 创建商品卡 → 上传图片 → 设置价格 → 写入库存 → 合并确认").pack(anchor="w")
+        self.wb_task_tree = ttk.Treeview(details, columns=("vendor", "stage", "status", "message"), show="headings")
+        for key, title, width in (("vendor", "货号", 160), ("stage", "当前阶段", 140), ("status", "状态", 100), ("message", "运行信息 / 错误", 700)):
+            self.wb_task_tree.heading(key, text=title)
+            self.wb_task_tree.column(key, width=width)
+        self.wb_task_tree.pack(fill=tk.BOTH, expand=True)
+        ttk.Button(details, text="编辑选中任务资料 / 修正后重试", command=lambda: self._wb_edit_failed_task(True)).pack(anchor="w")
+
+        self._build_wb_inventory_tab()
+        self._build_wb_product_editor_tab()
+
+    def _wb_task_log(self, message):
+        self._log(message)
+        if not hasattr(self, "wb_task_log_text"):
+            return
+        line = f"{time.strftime('%H:%M:%S')}  {message}\n"
+        def update():
+            self.wb_task_log_text.configure(state="normal")
+            self.wb_task_log_text.insert(tk.END, line)
+            self.wb_task_log_text.see(tk.END)
+            self.wb_task_log_text.configure(state="disabled")
+            self.wb_status_var.set(str(message))
+            if "失败 / 暂停" in str(message) and hasattr(self, "wb_task_tree"):
+                for iid in self.wb_task_tree.get_children():
+                    values = list(self.wb_task_tree.item(iid, "values"))
+                    if values[2] not in ("completed", "failed"):
+                        values[2:] = ["failed", str(message)]
+                        self.wb_task_tree.item(iid, values=values)
+        self._ui_call(update)
+
+    def _wb_task_state(self, state, batch=None):
+        if not hasattr(self, "wb_task_tree"):
+            return
+        stage = state.get("stage", "new")
+        labels = {"new": "准备资料", "card_submitted": "等待商品卡", "card_ready": "上传图片",
+                  "media_uploaded": "等待价格同步", "price_submitted": "等待价格生效",
+                  "price_ready": "写入库存", "completed": "上架完成", "preparing": "AI 生成资料"}
+        vendor = str(state.get("inputs", {}).get("vendor_code") or "当前商品")
+        message = state.get("error") or state.get("message") or labels.get(stage, stage)
+        rows = batch or [state]
+        maximum = len(rows) * 6 + (1 if batch else 0)
+        progress = sum(WbListingWorkflow.STAGES.get(item.get("stage", "new"), 0) for item in rows)
+        if batch and all(item.get("group_verified") for item in rows):
+            progress += 1
+        def update():
+            values = (vendor, labels.get(stage, stage), state.get("status", "running"), message)
+            if self.wb_task_tree.exists(vendor):
+                self.wb_task_tree.item(vendor, values=values)
+            else:
+                self.wb_task_tree.insert("", tk.END, iid=vendor, values=values)
+            self.wb_progress.configure(maximum=maximum, value=progress)
+            self.wb_detail_var.set(f"{vendor}：{message}")
+        self._ui_call(update)
+
+    def _build_wb_variants_tab(self):
+        tab = ttk.Frame(self.wb_product_tabs, padding=10)
+        self.wb_product_tabs.add(tab, text="4. 多变体")
+        ttk.Label(tab, text="选择变体可预览图片；双击编辑。独立图库模式使用各行货号；同卡尺码模式使用商品信息页货号。",
+                  wraplength=1000).pack(anchor="w")
+        self.wb_variant_mode = tk.StringVar(value="group")
+        modes = ttk.Frame(tab)
+        modes.pack(fill=tk.X)
+        ttk.Radiobutton(modes, text="独立图片、价格，合并商品组", variable=self.wb_variant_mode, value="group").pack(side=tk.LEFT)
+        ttk.Radiobutton(modes, text="同卡尺码，共用图库和售价", variable=self.wb_variant_mode, value="sizes").pack(side=tk.LEFT)
+        warehouse = ttk.Frame(tab)
+        warehouse.pack(fill=tk.X, pady=6)
+        ttk.Button(warehouse, text="读取仓库", command=lambda: self._run(self._wb_load_warehouses)).pack(side=tk.LEFT)
+        self.wb_variant_warehouse_combo = ttk.Combobox(warehouse, textvariable=self._var("wb_warehouse_display"), state="readonly", width=55)
+        self.wb_variant_warehouse_combo.pack(side=tk.LEFT, padx=8)
+        self.wb_variant_warehouse_combo.bind("<<ComboboxSelected>>", self._wb_warehouse_selected)
+        ttk.Label(warehouse, text="各行库存写入此仓库；双击变体修改库存和图片").pack(side=tk.LEFT)
+        saved_settings = load_json(self.OUTPUT_DIR / "wb-variant-settings.json", {})
+        if isinstance(saved_settings, dict):
+            for key in ("wb_pricing_mode", "wb_manual_currency", "wb_price", "wb_warehouse_display", "wb_warehouse_id"):
+                if key in saved_settings:
+                    self._var(key).set(str(saved_settings[key]))
+            if saved_settings.get("wb_pricing_mode") == "manual":
+                self._var("wb_manual_price").set(saved_settings.get("wb_price", ""))
+        self._wb_variants_lock = threading.Lock()
+        self.wb_variant_rows = load_json(self.OUTPUT_DIR / "wb-variant-draft.json", [])
+        if not isinstance(self.wb_variant_rows, list):
+            self.wb_variant_rows = []
+        self.wb_variant_tree = ttk.Treeview(tab, columns=("vendor", "style", "size", "price", "stock", "images"), show="headings")
+        for key, label in zip(self.wb_variant_tree["columns"], ("货号", "颜色/款式", "尺码", "售价", "库存", "图片数")):
+            self.wb_variant_tree.heading(key, text=label)
+        self.wb_variant_tree.pack(fill=tk.BOTH, expand=True)
+        self.wb_variant_tree.bind("<<TreeviewSelect>>", self._wb_preview_variant)
+        self.wb_variant_tree.bind("<Double-1>", lambda _e: self._wb_edit_variant())
+        self.wb_variant_preview = ttk.Frame(tab, height=150)
+        self.wb_variant_preview.pack(fill=tk.X)
+        for row in self.wb_variant_rows:
+            self._wb_show_variant_row(row)
+        ttk.Button(tab, text="编辑选中变体 / 图片", command=self._wb_edit_variant).pack(side=tk.LEFT)
+        ttk.Button(tab, text="编辑上架资料 / 修正错误", command=self._wb_edit_failed_task).pack(side=tk.LEFT)
+        ttk.Button(tab, text="保存变体草稿", command=self._wb_save_variant_draft).pack(side=tk.LEFT)
+        ttk.Button(tab, text="添加变体", command=self._wb_add_variant).pack(side=tk.LEFT)
+        ttk.Button(tab, text="删除选中变体", command=self._wb_delete_variants).pack(side=tk.LEFT)
+        ttk.Button(tab, text="批量上架 / 继续", command=lambda: self._run(self._wb_run_variants)).pack(side=tk.LEFT)
+
+    def _wb_save_variant_draft(self):
+        atomic_write_json(self.OUTPUT_DIR / "wb-variant-draft.json", self.wb_variant_rows)
+        keys = ("wb_pricing_mode", "wb_manual_currency", "wb_price", "wb_warehouse_display", "wb_warehouse_id")
+        atomic_write_json(self.OUTPUT_DIR / "wb-variant-settings.json",
+                          {key: self.vars[key].get() for key in keys if key in self.vars})
+        if hasattr(self, "wb_status_var"):
+            self.wb_status_var.set(f"已保存 {len(self.wb_variant_rows)} 个变体草稿")
+
+    def _wb_show_variant_row(self, row):
+        values = (row["vendor_code"], row["style"], row["tech_size"], row["price"], row["stock"], len(row["image_paths"]))
+        if self.wb_variant_tree.exists(row["id"]):
+            self.wb_variant_tree.item(row["id"], values=values)
+        else:
+            self.wb_variant_tree.insert("", tk.END, iid=row["id"], values=values)
+
+    @staticmethod
+    def _wb_correct_task(state, changes):
+        if state.get("stage") != "new":
+            raise ValueError("此商品已提交或已创建，请先继续查询结果；不能重置为新商品重复提交")
+        updated = copy.deepcopy(state)
+        inputs = updated["inputs"]
+        for key in ("title", "description", "brand", "characteristic_values"):
+            if key in changes:
+                inputs[key] = copy.deepcopy(changes[key])
+        build_card_payload(dict(inputs, barcode=inputs.get("barcode") or "PREVIEW"))
+        updated["previous_error"] = state.get("error") or state.get("previous_error", "")
+        updated.update(status="queued", error="", message="已人工修正，等待重新提交", manually_corrected=True)
+        updated.pop("payload", None)
+        return updated
+
+    def _wb_edit_failed_task(self, from_tasks=False):
+        if getattr(self, "busy", False):
+            messagebox.showwarning("任务运行中", "请等待当前任务结束后再修改提交资料")
+            return
+        mode = self.wb_variant_mode.get()
+        path = self.OUTPUT_DIR / ("wb-group-job.json" if mode == "group" else "wb-sizes-job.json")
+        batch = load_json(path, [])
+        if not batch:
+            messagebox.showinfo("尚无提交资料", "请先启动一次多变体任务，生成的文案和属性将保存在任务中")
+            return
+        tree = self.wb_task_tree if from_tasks else self.wb_variant_tree
+        selected = tree.selection()
+        selected_ids = set(selected)
+        vendor = selected[0] if from_tasks and selected else None
+        state = next((item for item in batch if (item.get("task_id") in selected_ids or item["inputs"]["vendor_code"] == vendor)), None)
+        if mode == "sizes" and selected and not state:
+            state = batch[0]
+        if not selected:
+            state = next((item for item in batch if item.get("stage") == "new" and item.get("status") == "failed"), None)
+        if not state:
+            messagebox.showinfo("选择任务", "请选择需要修改的变体，或在任务流程中选择对应货号")
+            return
+        if state.get("stage") != "new":
+            messagebox.showinfo("不能重新创建", "该商品正在同步或已创建，请点击继续任务查询结果。仅被拒绝或尚未提交的商品可编辑后重新提交。")
+            return
+        original = copy.deepcopy(state)
+        inputs = state["inputs"]
+        dialog = tk.Toplevel(self.root)
+        dialog.title("修正上架资料：" + inputs["vendor_code"])
+        dialog.geometry("1000x740")
+        ttk.Label(dialog, text="WB 返回：" + str(state.get("error") or state.get("previous_error") or "尚未提交"),
+                  wraplength=950, foreground="#b03030").pack(fill=tk.X, padx=10, pady=8)
+        ttk.Label(dialog, text="这里修改实际提交的文案和属性。货号、条码和其他变体进度保留；重试不会重新运行 AI。").pack(anchor="w", padx=10)
+        title = tk.StringVar(value=inputs.get("title", ""))
+        brand = tk.StringVar(value=inputs.get("brand", ""))
+        ttk.Label(dialog, text="标题").pack(anchor="w", padx=10)
+        ttk.Entry(dialog, textvariable=title).pack(fill=tk.X, padx=10)
+        ttk.Label(dialog, text="品牌（可选）").pack(anchor="w", padx=10)
+        ttk.Entry(dialog, textvariable=brand).pack(fill=tk.X, padx=10)
+        ttk.Label(dialog, text="描述").pack(anchor="w", padx=10)
+        description = tk.Text(dialog, height=5, wrap="word")
+        description.pack(fill=tk.X, padx=10)
+        description.insert("1.0", inputs.get("description", ""))
+        values = copy.deepcopy(inputs.get("characteristic_values") or {})
+        definitions = {str(d["charcID"]):d for d in inputs.get("characteristic_definitions", [])}
+        table = ttk.Treeview(dialog, columns=("name", "value"), show="headings", height=8)
+        table.heading("name", text="属性名称（选择后编辑）")
+        table.heading("value", text="当前提交值")
+        table.column("name", width=260);table.column("value", width=650)
+        table.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        for key, definition in definitions.items():
+            table.insert("", tk.END, iid=key, values=(definition.get("name", key), json.dumps(values.get(key, ""), ensure_ascii=False)))
+        edit = tk.StringVar()
+        entry = ttk.Entry(dialog, textvariable=edit)
+        entry.pack(fill=tk.X, padx=10)
+        active = [None]
+        def commit():
+            key = active[0]
+            if key is None:
+                return
+            raw = edit.get().strip()
+            try:
+                value = json.loads(raw)
+            except ValueError:
+                value = raw
+            if raw:
+                values[key] = value
+            else:
+                values.pop(key, None)
+            table.set(key, "value", json.dumps(values.get(key, ""), ensure_ascii=False))
+        def select(_event=None):
+            commit()
+            selection = table.selection()
+            active[0] = selection[0] if selection else None
+            options.set(""); options.configure(values=[]); options_map.clear()
+            edit.set(json.dumps(values.get(active[0], ""), ensure_ascii=False) if active[0] else "")
+        table.bind("<<TreeviewSelect>>", select)
+        options = ttk.Combobox(dialog, state="readonly")
+        options.pack(fill=tk.X, padx=10, pady=4)
+        options_map = {}
+        def load_options():
+            key = active[0]
+            if key is None:
+                return
+            try:
+                kind = self._wb_directory_kind(definitions[key].get("name", ""))
+                api = self._wb_api_from_ui()
+            except ValueError as error:
+                messagebox.showinfo("官方选项", str(error), parent=dialog)
+                return
+            def work():
+                rows = api.directory_values(kind, subject_id=int(inputs["subject_id"]), locale="ru")
+                def apply():
+                    if not dialog.winfo_exists() or active[0] != key:
+                        return
+                    options_map.clear()
+                    for raw in rows:
+                        value = next((raw.get(k) for k in ("name", "value", "title", "id") if raw.get(k) not in (None, "")), raw) if isinstance(raw, dict) else raw
+                        options_map[str(value)] = value
+                    options.configure(values=list(options_map))
+                    options.set("")
+                self._ui_call(apply)
+            self._run(work)
+        def use_option():
+            if options.get() in options_map:
+                edit.set(json.dumps([options_map[options.get()]], ensure_ascii=False))
+                commit()
+        controls = ttk.Frame(dialog);controls.pack(fill=tk.X, padx=10, pady=6)
+        ttk.Button(controls, text="应用属性修改", command=commit).pack(side=tk.LEFT)
+        ttk.Button(controls, text="读取官方选项", command=load_options).pack(side=tk.LEFT)
+        ttk.Button(controls, text="采用官方选项", command=use_option).pack(side=tk.LEFT)
+        def save(retry=False):
+            try:
+                if getattr(self, "busy", False):
+                    raise ValueError("请等待正在运行的操作结束")
+                commit()
+                latest = load_json(path, [])
+                index = next((i for i, item in enumerate(latest) if item.get("task_id") == original.get("task_id")), None)
+                if index is None or latest[index] != original:
+                    raise ValueError("任务已发生变化，请关闭窗口后重新打开编辑")
+                latest[index] = self._wb_correct_task(original, dict(title=title.get().strip(), brand=brand.get().strip(),
+                    description=description.get("1.0", tk.END).strip(), characteristic_values=values))
+                atomic_write_json(path.with_name(path.stem + ".before-edit-" + time.strftime("%Y%m%d-%H%M%S") + ".json"), load_json(path, []))
+                atomic_write_json(path, latest)
+                self._wb_task_state(latest[index], latest)
+                self.vars["wb_vendor_code"].set(original.get("batch_vendor") or inputs["vendor_code"])
+                self._wb_task_log(inputs["vendor_code"] + "：人工修改已保存，重试使用修正后的属性")
+                dialog.destroy()
+                if retry:
+                    self._run(self._wb_run_variants)
+            except Exception as error:
+                messagebox.showerror("无法保存修改", str(error), parent=dialog)
+        ttk.Button(controls, text="保存修正", command=save).pack(side=tk.RIGHT)
+        ttk.Button(controls, text="保存并继续上架", command=lambda: save(True)).pack(side=tk.RIGHT)
+        color = next((key for key, definition in definitions.items() if any(word in definition.get("name", "").lower() for word in ("颜色", "color", "цвет"))), None)
+        if color:
+            table.selection_set(color);table.see(color)
+
+    def _wb_edit_variant(self):
+        selection = self.wb_variant_tree.selection()
+        if selection:
+            self._wb_add_variant(next(row for row in self.wb_variant_rows if row["id"] == selection[0]))
+
+    def _wb_preview_variant(self, _event=None):
+        for child in self.wb_variant_preview.winfo_children():
+            child.destroy()
+        selection = self.wb_variant_tree.selection()
+        if not selection:
+            return
+        row = next(row for row in self.wb_variant_rows if row["id"] == selection[0])
+        self._wb_image_gallery(self.wb_variant_preview, row["image_paths"])
+
+    def _wb_image_gallery(self, parent, paths):
+        canvas = tk.Canvas(parent, height=150)
+        canvas.pack(fill=tk.X)
+        scroll = ttk.Scrollbar(parent, orient="horizontal", command=canvas.xview)
+        scroll.pack(fill=tk.X)
+        canvas.configure(xscrollcommand=scroll.set)
+        canvas.photos = []
+        for i, path in enumerate(paths):
+            x = i * 145
+            try:
+                with Image.open(path) as source:
+                    thumb = ImageOps.exif_transpose(source).convert("RGB")
+                    thumb.thumbnail((135, 115))
+                photo = ImageTk.PhotoImage(thumb, master=parent)
+                canvas.photos.append(photo)
+                canvas.create_image(x + 70, 60, image=photo)
+            except (OSError, ValueError):
+                canvas.create_text(x + 70, 60, text="图片无法读取")
+            canvas.create_text(x + 70, 130, text=f"{i + 1}. {Path(path).name[:16]}")
+        canvas.configure(scrollregion=(0, 0, max(1, len(paths)) * 145, 145))
+
+    def _wb_delete_variants(self):
+        for iid in self.wb_variant_tree.selection():
+            self.wb_variant_rows = [row for row in self.wb_variant_rows if row["id"] != iid]
+            self.wb_variant_tree.delete(iid)
+        self._wb_save_variant_draft()
+        self._wb_preview_variant()
+
+    def _wb_add_variant(self, existing=None):
+        dialog = tk.Toplevel(self.root)
+        dialog.title("添加 WB 变体")
+        fields = {}
+        for index, (key, label) in enumerate((("vendor_code", "独立卖家货号"), ("style", "颜色/款式"),
+                ("tech_size", "技术尺码"), ("wb_size", "WB 尺码"), ("price", "售价（店铺币种整数）"), ("stock", "库存"), ("purchase_cost", "采购成本 CNY（自动核价；留空用公共值）"),
+                ("weight_kg", "重量 kg（自动核价；留空用公共值）"))):
+            if key == "purchase_cost" and self.vars["wb_pricing_mode"].get() == "manual":
+                fields[key] = tk.StringVar(value=(existing or {}).get(key, ""))
+                continue
+            ttk.Label(dialog, text=label).grid(row=index, column=0)
+            fields[key] = tk.StringVar(value=(existing or {}).get(key, ""))
+            ttk.Entry(dialog, textvariable=fields[key]).grid(row=index, column=1)
+        paths = list((existing or {}).get("image_paths", []))
+        gallery = ttk.Frame(dialog)
+        gallery.grid(row=9, column=0, columnspan=2, sticky="ew")
+        image_list = tk.Listbox(dialog, width=85, height=5, exportselection=False)
+        image_list.grid(row=10, column=0, columnspan=2, sticky="ew")
+        def refresh():
+            image_list.delete(0, tk.END)
+            for path in paths:
+                image_list.insert(tk.END, path)
+            for child in gallery.winfo_children():
+                child.destroy()
+            self._wb_image_gallery(gallery, paths)
+        def select():
+            added = filedialog.askopenfilenames(parent=dialog, title="添加该变体图片", filetypes=[("图片", "*.jpg *.jpeg *.png *.webp *.bmp")])
+            paths.extend(path for path in added if path not in paths)
+            refresh()
+        def modify(action):
+            selection = image_list.curselection()
+            if not selection:
+                return
+            index = selection[0]
+            if action == "remove":
+                paths.pop(index)
+            elif action == "replace":
+                path = filedialog.askopenfilename(parent=dialog, title="替换此图片")
+                if path:
+                    paths[index] = path
+            else:
+                target = index + action
+                if 0 <= target < len(paths):
+                    paths[index], paths[target] = paths[target], paths[index]
+            refresh()
+        controls = ttk.Frame(dialog)
+        controls.grid(row=8, column=0, columnspan=2)
+        ttk.Button(controls, text="添加图片", command=select).pack(side=tk.LEFT)
+        for label, action in (("替换", "replace"), ("删除", "remove"), ("上移", -1), ("下移", 1)):
+            ttk.Button(controls, text=label, command=lambda action=action: modify(action)).pack(side=tk.LEFT)
+        refresh()
+        def save():
+            try:
+                row = {key: value.get().strip() for key, value in fields.items()}
+                if not row["vendor_code"] or any(r["vendor_code"] == row["vendor_code"] and r["id"] != (existing or {}).get("id") for r in self.wb_variant_rows):
+                    raise ValueError("货号不能为空或重复")
+                manual = self.vars["wb_pricing_mode"].get() == "manual"
+                if (manual and int(row["price"]) <= 0) or int(row["stock"]) < 0:
+                    raise ValueError("售价必须为正整数，库存不能为负数")
+                validate_image_paths(paths, check_resolution=False)
+                row.update(id=(existing or {}).get("id") or uuid.uuid4().hex, image_paths=list(paths))
+                if existing:
+                    existing.update(row)
+                else:
+                    self.wb_variant_rows.append(row)
+                self._wb_show_variant_row(row)
+                self._wb_save_variant_draft()
+                self.wb_variant_tree.selection_set(row["id"])
+                self._wb_preview_variant()
+                dialog.destroy()
+            except (ValueError, OSError) as error:
+                messagebox.showerror("变体资料", str(error), parent=dialog)
+        ttk.Button(dialog, text="保存", command=save).grid(row=11, column=1)
+
+    def _wb_run_variants(self):
+        lock = getattr(self, "_wb_variants_lock", None)
+        if lock is None:
+            lock = self._wb_variants_lock = threading.Lock()
+        if not lock.acquire(blocking=False):
+            raise ValueError("多变体任务正在运行，请勿重复启动")
+        self._wb_task_log("开始多变体任务：校验资料和读取断点")
+        try:
+            result = self._wb_run_variants_locked()
+            self._wb_task_log("多变体任务完成")
+            return result
+        except Exception as error:
+            self._wb_task_log(f"多变体任务失败 / 暂停：{error}")
+            raise
+        finally:
+            lock.release()
+
+    def _wb_run_variants_locked(self):
+        settings = self._ui_call(self._wb_connection_settings)
+        base = self._ui_call(self._wb_collect_form_snapshot)
+        if base.get("pricing_mode") == "overseas_warehouse":
+            raise ValueError("海外仓运费公式待配置，请暂用直接设置售价模式")
+        rows = self._ui_call(lambda: copy.deepcopy(self.wb_variant_rows))
+        mode = self._ui_call(self.wb_variant_mode.get)
+        path = self.OUTPUT_DIR / ("wb-group-job.json" if mode == "group" else "wb-sizes-job.json")
+        if path.exists():
+            batch = json.loads(path.read_text(encoding="utf-8"))
+            if batch and all(x.get("stage") == "completed" and (mode != "group" or x.get("group_verified")) for x in batch):
+                raise ValueError("此批次已完成，请勿重复上架")
+            if batch and batch[0].get("batch_vendor", base["vendor_code"]) != base["vendor_code"]:
+                raise ValueError("有另一商品的未完成任务，请先恢复该商品继续")
+        else:
+            batch = []
+        if not settings["sandbox"] and base["warehouse_display"] not in self.wb_warehouse_by_display:
+            raise ValueError("请读取仓库并选择本次上架的目标仓库")
+        if batch:
+            for state in batch:
+                if state["stage"] != "completed":
+                    state["inputs"]["warehouse_id"] = base["warehouse_id"]
+                    state["inputs"]["warehouse_display"] = base["warehouse_display"]
+        api = WildberriesApi(settings["token"], sandbox=settings["sandbox"])
+        def save(_state):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(batch, ensure_ascii=False, indent=2), encoding="utf-8")
+            temporary.replace(path)
+            if _state:
+                self._wb_task_state(_state, batch)
+        for state in batch:
+            self._wb_task_state(state, batch)
+        if not batch:
+            if not rows:
+                raise ValueError("请先添加变体")
+            self._wb_task_log("读取 WB 类目属性")
+            definitions = api.subject_characteristics(int(base["subject_id"]))
+            config = self._ui_call(self._analysis_config)
+            if mode == "sizes" and base.get("pricing_mode") == "manual" and len({row["price"] for row in rows}) != 1:
+                raise ValueError("同卡尺码目前使用统一售价，请将各行售价设为相同")
+            if mode == "sizes" and (len({row["tech_size"] for row in rows}) != len(rows) or any(not row["tech_size"] for row in rows)):
+                raise ValueError("尺码不能为空或重复")
+            if mode == "sizes" and base.get("pricing_mode") != "manual" and len({
+                    (row.get("purchase_cost") or base.get("purchase_cost"), row.get("weight_kg") or base.get("weight_kg")) for row in rows}) > 1:
+                raise ValueError("同卡尺码自动核价需使用相同成本和重量；不同参数请选择独立图片模式")
+            size_rows = [{key: row[key] for key in ("tech_size", "wb_size", "stock")} for row in rows]
+            shared = dict(rows[0], vendor_code=base["vendor_code"])
+            if mode == "sizes" and any(row["image_paths"] != rows[0]["image_paths"] for row in rows):
+                raise ValueError("同卡尺码共用图库；不同图片请选择独立图片合并商品组模式")
+            if len(rows) > 30:
+                raise ValueError("单个商品组最多 30 个变体")
+            for index, row in enumerate((rows if mode == "group" else [shared]), 1):
+                self._wb_task_log(f"准备第 {index}/{len(rows)} 个变体 {row['vendor_code']}：AI 生成标题、描述及属性")
+                self._wb_task_state(dict(inputs=row, stage="preparing", status="running", message="正在生成标题、描述及属性"))
+                inputs = dict(base, **{k: v for k, v in row.items() if k not in ("id", "image_paths")})
+                for key in ("purchase_cost", "weight_kg"):
+                    inputs[key] = row.get(key) or base.get(key)
+                self._wb_apply_listing_price(inputs)
+                inputs["characteristic_definitions"] = definitions
+                generated = WbCardAiService(**config).generate(
+                    subject_id=int(base["subject_id"]), subject_name=base["subject_display"],
+                    definitions=definitions, image_paths=row["image_paths"],
+                    current_document=build_card_content_document(inputs),
+                    source_context={"style": row["style"], "reference": base.get("source_reference")})
+                parsed = parse_card_content_document(generated, definitions, expected_subject_id=int(base["subject_id"]))
+                for key in ("title", "description", "characteristic_values"):
+                    inputs[key] = parsed[key]
+                color = self._ui_call(lambda: self.vars["wb_uniform_color"].get() if "wb_uniform_color" in getattr(self, "vars", {}) else "")
+                if color:
+                    for definition in definitions:
+                        if any(word in definition.get("name", "").lower() for word in ("颜色", "цвет", "color")):
+                            inputs["characteristic_values"][str(definition["charcID"])] = [color]
+                self._wb_validate_listing_inputs(inputs, sandbox=settings["sandbox"])
+                # Manual mode preserves each row price; automatic mode keeps calculated price.
+                if mode == "sizes":
+                    inputs["size_variants"] = size_rows
+                batch.append(dict(inputs=inputs, stage="new", task_id=row["id"], batch_vendor=base["vendor_code"],
+                    image_paths=self._wb_copy_stable_images(row["image_paths"], row["vendor_code"])))
+            save(None)
+        workflow = WbListingWorkflow(api, save_state=save, log=self._wb_task_log)
+        while any(state["stage"] != "completed" for state in batch):
+            for state in batch:
+                if state["stage"] == "completed":
+                    continue
+                self._wb_task_log(f"处理 {state['inputs']['vendor_code']}：{state['stage']}")
+                try:
+                    workflow.advance(state)
+                except Exception as error:
+                    state.update(status="failed", error=str(error))
+                    save(state)
+                    raise
+                if state["stage"] == "completed":
+                    upsert_product_ledger(self.PRODUCT_LEDGER_PATH, self._wb_product_ledger_record(state))
+                    save(state)
+            if any(state["stage"] != "completed" for state in batch):
+                self._wb_task_log("等待 WB 异步同步，60 秒后自动查询；无需重复点击")
+                time.sleep(60)
+        if mode == "group" and len(batch) == 1:
+            batch[0]["group_verified"] = True
+            save(None)
+        if mode == "group" and len(batch) > 1:
+            self._wb_task_log("全部变体上架完成，正在查询并确认商品组合并")
+            cards = [api.find_card(state["inputs"]["vendor_code"]) for state in batch]
+            if any(not card or not card.get("imtID") for card in cards):
+                raise RuntimeError("变体已上架，商品组信息仍在同步，请稍后继续")
+            target = int(cards[0]["imtID"])
+            if any(int(card["imtID"]) != target for card in cards):
+                api.merge_cards(target, [state["nm_id"] for state in batch[1:]])
+                cards = [api.find_card(state["inputs"]["vendor_code"]) for state in batch]
+                if any(not card or int(card.get("imtID") or 0) != target for card in cards):
+                    raise RuntimeError("合并请求已提交，尚未确认，请稍后点击继续")
+            for state in batch:
+                state["group_verified"] = True
+            save(None)
+        for state in batch:
+            state["group_verified"] = True
+            self._wb_task_state(state, batch)
+        save(None)
+        self._ui_call(lambda: messagebox.showinfo("WB 多变体", "全部变体已完成上架及合并"))
 
     def _wb_form_entry(self, parent, label, key, row, column=0, *, default="", width=34):
         ttk.Label(parent, text=label).grid(row=row, column=column, sticky="w", padx=5, pady=4)
@@ -204,17 +739,28 @@ class WbUiMixin:
     def _build_wb_pricing_panel(self, pricing):
         for column in (1, 3, 5, 7):
             pricing.columnconfigure(column, weight=1)
-        ttk.Label(pricing, text="发货方式").grid(row=0, column=0, sticky="w", padx=4, pady=3)
+        ttk.Label(pricing, text="定价模式").grid(row=0, column=0, sticky="w", padx=4, pady=3)
         for column, text, value in (
-            (1, "跨境发货", "cross_border"),
-            (2, "海外仓发货", "overseas_warehouse"),
+            (1, "跨境自动核价", "cross_border"),
+            (3, "海外仓自动核价（待公式）", "overseas_warehouse"),
+            (5, "直接设置售价", "manual"),
         ):
             ttk.Radiobutton(
                 pricing, text=text, value=value,
-                variable=self._var("wb_fulfillment_mode", "cross_border"),
-                command=self._wb_on_fulfillment_mode_changed,
+                variable=self._var("wb_pricing_mode", "cross_border"),
+                command=self._wb_on_pricing_mode_changed,
             ).grid(row=0, column=column, sticky="w", padx=4, pady=3)
 
+        self._var("wb_fulfillment_mode", "cross_border")
+        self._var("wb_manual_price", "")
+        ttk.Label(pricing, text="手动售价币种").grid(row=5, column=0, sticky="w")
+        ttk.Combobox(pricing, textvariable=self._var("wb_manual_currency", "CNY"),
+                     values=("CNY", "RUB"), state="readonly", width=10).grid(row=5, column=1, sticky="w")
+        ttk.Label(pricing, text="手动模式使用店铺实际结算币种，不自动换算；多变体使用各行售价。跨境自动核价输出 CNY。",
+                  wraplength=850).grid(row=5, column=2, columnspan=6, sticky="w")
+        self.vars["wb_manual_currency"].trace_add("write", self._wb_on_pricing_mode_changed)
+
+        self.wb_auto_pricing_widgets = []
         def pricing_entry(label, key, row, column, default=""):
             label_widget = ttk.Label(pricing, text=label)
             label_widget.grid(
@@ -224,6 +770,8 @@ class WbUiMixin:
                 pricing, textvariable=self._var(key, default), width=12,
             )
             entry.grid(row=row, column=column + 1, sticky="ew", padx=4, pady=3)
+            if key != "wb_discount":
+                self.wb_auto_pricing_widgets.extend((label_widget, entry))
             return label_widget, entry
 
         pricing_entry("采购成本(CNY)", "wb_purchase_cost", 1, 0)
@@ -302,14 +850,15 @@ class WbUiMixin:
         tab.rowconfigure(5, weight=2)
         ttk.Label(tab, text="父类目").grid(row=0, column=0, sticky="w", padx=5, pady=4)
         self.wb_parent_combo = ttk.Combobox(
-            tab, textvariable=self._var("wb_parent_display"), state="readonly",
+            tab, textvariable=self._var("wb_parent_display"), state="normal",
         )
+        self.wb_parent_combo.bind("<Return>", lambda _event: self._run(self._wb_load_parents))
         self.wb_parent_combo.grid(row=0, column=1, sticky="ew", padx=5, pady=4)
         self.wb_parent_combo.bind(
             "<<ComboboxSelected>>", lambda _event: self._run(self._wb_load_subjects),
         )
         ttk.Button(
-            tab, text="加载父类目", command=lambda: self._run(self._wb_load_parents),
+            tab, text="搜索/加载父类目", command=lambda: self._run(self._wb_load_parents),
         ).grid(row=0, column=2, sticky="w", padx=5)
         ttk.Label(tab, text="子类目").grid(row=1, column=0, sticky="w", padx=5, pady=4)
         self.wb_subject_combo = ttk.Combobox(
@@ -526,7 +1075,13 @@ class WbUiMixin:
         )
 
     def _wb_load_parents(self):
+        query = self._ui_call(lambda: self.vars["wb_parent_display"].get().strip())
+        if query in self.wb_parent_by_display:
+            query = ""
         parents = self._wb_api_from_ui().parent_categories()
+        if query:
+            parents = [item for item in parents if query.casefold() in
+                       " ".join(map(str, self._wb_parent_identity(item))).casefold()]
 
         def update():
             self.wb_parents = parents
@@ -944,6 +1499,24 @@ class WbUiMixin:
     def _wb_update_price(self, *_args):
         if self._wb_pricing_trace_suspended or not hasattr(self, "wb_pricing_status_var"):
             return None
+        mode = self.vars["wb_pricing_mode"].get() if "wb_pricing_mode" in self.vars else "cross_border"
+        for widget in getattr(self, "wb_auto_pricing_widgets", []):
+            widget.grid_remove() if mode == "manual" else widget.grid()
+        if mode == "manual":
+            self.wb_cross_border_pricing.grid_remove()
+            self.wb_overseas_pricing.grid_remove()
+        if mode in {"manual", "overseas_warehouse"}:
+            self.wb_pricing_breakdown = None
+            self.wb_price_entry.configure(state="normal" if mode == "manual" else "readonly")
+            if mode == "manual":
+                self.wb_price_currency_var.set(f"手动售价({self.vars['wb_manual_currency'].get()})")
+                self.wb_pricing_status_var.set("直接采用输入售价；多变体采用各行售价，不校验成本、佣金和利润率")
+            else:
+                self.vars["wb_price"].set("")
+                self.wb_pricing_status_var.set("海外仓运费公式待配置，暂不可自动核价或提交；可选择直接设置售价")
+                self.wb_overseas_fee_var.set("海外仓物流：等待运费公式")
+            return None
+        self.wb_price_entry.configure(state="readonly")
         try:
             result = self._wb_calculate_pricing(self._wb_pricing_form_values())
         except Exception as error:
@@ -985,6 +1558,44 @@ class WbUiMixin:
             f"利润率 {self._wb_money(result.actual_profit_margin_percent)}%"
         )
         return result
+
+    def _wb_on_pricing_mode_changed(self, *_args):
+        mode = self.vars["wb_pricing_mode"].get()
+        if getattr(self, "_wb_last_pricing_mode", "") == "manual":
+            self.vars["wb_manual_price"].set(self.vars["wb_price"].get())
+        if mode != "manual":
+            self.vars["wb_fulfillment_mode"].set(mode)
+        elif getattr(self, "_wb_last_pricing_mode", "") != "manual":
+            self.vars["wb_price"].set(self.vars["wb_manual_price"].get())
+        self._wb_last_pricing_mode = mode
+        self._wb_on_fulfillment_mode_changed()
+
+    @staticmethod
+    def _wb_apply_listing_price(inputs):
+        mode = inputs.get("pricing_mode")
+        if mode == "manual":
+            currency = inputs.get("manual_currency") or "CNY"
+            if currency not in {"CNY", "RUB"}:
+                raise ValueError("请选择手动售价币种 CNY 或 RUB")
+            try:
+                price = Decimal(str(inputs.get("price") or "").strip())
+            except InvalidOperation as error:
+                raise ValueError("手动售价必须是大于 0 的整数") from error
+            if not price.is_finite() or price <= 0 or price != price.to_integral_value():
+                raise ValueError("手动售价必须是大于 0 的整数")
+            inputs["price"] = format(price, "f")
+            inputs["currency_code"] = currency
+            inputs["pricing_breakdown"] = {}
+            return
+        if mode == "overseas_warehouse":
+            raise ValueError("海外仓运费公式待配置，请暂用直接设置售价模式")
+        if mode not in (None, "", "cross_border"):
+            raise ValueError("请选择有效的定价模式")
+        if mode == "cross_border":
+            inputs["fulfillment_mode"] = "cross_border"
+        pricing = WbUiMixin._wb_calculate_pricing(inputs)
+        inputs.update(price=format(pricing.list_price, "f"), currency_code=pricing.currency_code,
+                      pricing_breakdown=pricing.json_values())
 
     def _wb_on_fulfillment_mode_changed(self, *_args):
         if not hasattr(self, "wb_pricing_status_var"):
@@ -1114,6 +1725,10 @@ class WbUiMixin:
                     self.wb_warehouse_by_display[display] = item
             values = list(self.wb_warehouse_by_display)
             self.wb_warehouse_combo.configure(values=values)
+            self.wb_variant_warehouse_combo.configure(values=values)
+            if self.vars["wb_warehouse_display"].get() not in values:
+                self.vars["wb_warehouse_display"].set("")
+                self.vars["wb_warehouse_id"].set("")
             if api.sandbox:
                 self.vars["wb_warehouse_id"].set("")
                 self.vars["wb_warehouse_display"].set("Sandbox 不写真实库存")
@@ -1138,6 +1753,7 @@ class WbUiMixin:
             "wb_height_cm", "wb_weight_kg", "wb_tech_size", "wb_size", "wb_barcode",
             "wb_price", "wb_discount", "wb_warehouse_id", "wb_warehouse_display", "wb_stock",
             "wb_seller_name", "wb_seller_id", "wb_fulfillment_mode",
+            "wb_pricing_mode", "wb_manual_currency",
             "wb_sales_commission_percent",
             "wb_purchase_cost", "wb_label_fee", "wb_target_profit_margin_percent",
             "wb_advertising_percent", "wb_cargo_loss_percent", "wb_cny_rub_rate",
@@ -1174,10 +1790,7 @@ class WbUiMixin:
         fulfillment_mode = str(inputs.get("fulfillment_mode") or "cross_border").strip()
         if fulfillment_mode not in {"cross_border", "overseas_warehouse"}:
             raise ValueError("WB 核价方式无效，请重新选择跨境发货或海外仓发货")
-        pricing = WbUiMixin._wb_calculate_pricing(inputs)
-        inputs["price"] = format(pricing.list_price, "f")
-        inputs["currency_code"] = pricing.currency_code
-        inputs["pricing_breakdown"] = pricing.json_values()
+        WbUiMixin._wb_apply_listing_price(inputs)
         preview = dict(inputs)
         preview["barcode"] = preview.get("barcode") or "PREVIEW-BARCODE"
         build_card_payload(preview)
@@ -1188,7 +1801,7 @@ class WbUiMixin:
         except (InvalidOperation, ValueError) as error:
             raise ValueError("WB 售价、折扣和库存必须是有效整数") from error
         if not price.is_finite() or price <= 0 or price != price.to_integral_value():
-            raise ValueError(f"WB 售价必须是大于 0 的整数 {pricing.currency_code}")
+            raise ValueError(f"WB 售价必须是大于 0 的整数 {inputs['currency_code']}")
         if discount < 0 or discount >= 100:
             raise ValueError("WB 折扣必须在 0 到 99 之间")
         if stock < 0:
@@ -1227,6 +1840,10 @@ class WbUiMixin:
         return validate_image_paths(copied)
 
     def _confirm_wb_submit(self):
+        if self.wb_product_tabs.index(self.wb_product_tabs.select()) == 3 and self.wb_variant_rows:
+            if messagebox.askyesno("确认多变体上架", f"将运行 {len(self.wb_variant_rows)} 个变体的上架流程，继续吗？"):
+                self._run(self._wb_run_variants)
+            return
         if not self.vars["wb_token"].get().strip():
             messagebox.showwarning("未配置 WB", "请先填写并保存 WB API Token")
             return
@@ -1243,7 +1860,7 @@ class WbUiMixin:
             f"当前为 {listing_label} / {fulfillment_label}，人工佣金 "
             f"{self.vars['wb_sales_commission_percent'].get().strip() or '未填写'}%，"
             f"目标利润率 {self.vars['wb_target_profit_margin_percent'].get().strip() or '未填写'}%，"
-            f"自动标价 {self.vars['wb_price'].get().strip() or '未计算'} RUB。\n"
+            f"售价 {self.vars['wb_price'].get().strip() or '未计算'}（币种见定价面板）。\n"
             "将通过 WB API 创建或继续商品卡片，并上传图片、设置价格和库存。\n"
             "程序会按卖家货号防止重复创建。确认继续吗？",
         ):
@@ -1251,9 +1868,38 @@ class WbUiMixin:
         self._run(self._wb_run_pipeline)
 
     def _wb_run_pipeline(self):
+        self._wb_task_log("开始单商品任务：校验资料")
+        try:
+            result = self._wb_run_pipeline_impl()
+            self._wb_task_log("单商品上架完成")
+            return result
+        except Exception as error:
+            self._wb_task_log(f"单商品任务失败 / 暂停：{error}")
+            raise
+
+    def _wb_run_pipeline_impl(self):
         settings = self._ui_call(self._wb_connection_settings)
         inputs = self._ui_call(self._wb_collect_form_snapshot)
         selected_images = self._ui_call(lambda: list(self.wb_image_paths))
+        if not self.wb_job or self.wb_job.get("stage", "new") == "new":
+            subject = int(inputs["subject_id"])
+            definitions = WildberriesApi(settings["token"], sandbox=settings["sandbox"]).subject_characteristics(subject)
+            inputs["characteristic_definitions"] = definitions
+            validate_image_paths(selected_images, check_resolution=False)
+            self._wb_task_log("AI 正在生成 WB 标题、描述和属性")
+            generated = WbCardAiService(**self._ui_call(self._analysis_config)).generate(
+                subject_id=subject, subject_name=inputs["subject_display"],
+                definitions=definitions, image_paths=selected_images,
+                current_document=build_card_content_document(inputs),
+                source_context=inputs.get("source_reference") or {},
+            )
+            parsed = parse_card_content_document(generated, definitions, expected_subject_id=subject)
+            for key in ("title", "description", "characteristic_values", "tech_size", "wb_size"):
+                inputs[key] = parsed.get(key)
+            def apply_generated():
+                self.wb_characteristics = definitions
+                self._wb_apply_content_values(inputs)
+            self._ui_call(apply_generated)
         self._wb_validate_listing_inputs(inputs, sandbox=settings["sandbox"])
         validate_image_paths(selected_images, check_resolution=False)
         vendor_code = inputs["vendor_code"]
@@ -1274,7 +1920,7 @@ class WbUiMixin:
             elif stage in {"card_submitted", "card_ready", "media_uploaded"}:
                 state["inputs"].update({
                     key: inputs[key] for key in (
-                        "price", "discount", "fulfillment_mode", "purchase_cost",
+                        "price", "discount", "fulfillment_mode", "pricing_mode", "manual_currency", "currency_code", "purchase_cost",
                         "label_fee", "target_profit_margin_percent",
                         "sales_commission_percent", "advertising_percent",
                         "cargo_loss_percent", "cny_rub_rate", "weight_kg",
@@ -1303,10 +1949,13 @@ class WbUiMixin:
         self._save_wb_job(state)
         api = WildberriesApi(settings["token"], sandbox=settings["sandbox"])
         workflow = WbListingWorkflow(
-            api, save_state=self._save_wb_job, log=self._log,
+            api, save_state=self._save_wb_job, log=self._wb_task_log,
         )
         try:
             result = workflow.advance(state)
+            while result.get("stage") != "completed":
+                time.sleep(60)
+                result = workflow.advance(state)
         except Exception as error:
             state["status"] = "failed"
             state["error"] = str(error) or type(error).__name__
@@ -1376,7 +2025,7 @@ class WbUiMixin:
             state = {"inputs": inputs, "stage": "new", "task_id": job["id"],
                      "image_paths": paths}
             save(state)
-        workflow = WbListingWorkflow(api, save_state=save, log=self._log)
+        workflow = WbListingWorkflow(api, save_state=save, log=self._wb_task_log)
         while state["stage"] != "completed":
             self._check_auto_job_cancelled(job)
             workflow.advance(state)
@@ -1461,6 +2110,7 @@ class WbUiMixin:
     def _save_wb_job(self, state: dict):
         self.wb_job = state
         atomic_write_json(self.WB_JOB_PATH, state)
+        self._wb_task_state(state)
         root = getattr(self, "root", None)
         if root is not None and not getattr(self, "_closing", False):
             if threading.current_thread() is threading.main_thread():
