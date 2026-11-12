@@ -1,0 +1,35 @@
+{
+  "target": "https://erp.wxzwxz.xyz",
+  "product": {
+    "source": "ozon-seller-center",
+    "external_id": "b54b52c2b35990139c47ca99f42c808a2b789d63813394555a07cccc376982ce",
+    "sku": "AUTO-20261110-FF932018BB174DA3",
+    "name": "Елочная игрушка гном разноцветный 3 шт",
+    "variants": [
+      {
+        "sku": "AUTO-20261110-FF932018BB174DA3",
+        "specification": "AUTO-20261110-FF932018BB174DA3",
+        "purchase_price_cny": 16.0,
+        "package_length_mm": 200.0,
+        "package_width_mm": 200.0,
+        "package_height_mm": 200.0,
+        "weight_grams": 160.0,
+        "images": [
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-FF932018BB174DA3/AUTO-20261110-FF932018BB174DA3%E4%B8%BB%E5%9B%BE.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-FF932018BB174DA3/%E9%99%84%E5%9B%BE%281%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-FF932018BB174DA3/%E9%99%84%E5%9B%BE%282%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-FF932018BB174DA3/%E9%99%84%E5%9B%BE%283%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-FF932018BB174DA3/%E9%99%84%E5%9B%BE%284%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-FF932018BB174DA3/%E9%99%84%E5%9B%BE%285%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-FF932018BB174DA3/%E9%99%84%E5%9B%BE%286%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-FF932018BB174DA3/%E9%99%84%E5%9B%BE%287%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-FF932018BB174DA3/%E9%99%84%E5%9B%BE%288%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-FF932018BB174DA3/%E9%99%84%E5%9B%BE%289%29.jpg"
+        ]
+      }
+    ],
+    "source_url": "https://detail.1688.com/offer/1068948962472.html",
+    "description_category_id": 17028733,
+    "type_id": 95421
+  }
+}

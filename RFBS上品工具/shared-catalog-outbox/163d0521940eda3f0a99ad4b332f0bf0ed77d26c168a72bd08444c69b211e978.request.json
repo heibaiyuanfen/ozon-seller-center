@@ -1,0 +1,33 @@
+{
+  "target": "https://erp.wxzwxz.xyz",
+  "product": {
+    "source": "ozon-seller-center",
+    "external_id": "a35a8f34fea818fabbb356fc567c3d0e4aa3ebed2524054ff0ccf55596da942f",
+    "sku": "AUTO-20261110-14928F75BC174DF9",
+    "name": "Набор для чистки гаджетов 7 в 1 (Серый)",
+    "variants": [
+      {
+        "sku": "AUTO-20261110-14928F75BC174DF9",
+        "specification": "AUTO-20261110-14928F75BC174DF9",
+        "purchase_price_cny": 5.0,
+        "package_length_mm": 450.0,
+        "package_width_mm": 150.0,
+        "package_height_mm": 350.0,
+        "weight_grams": 88.0,
+        "images": [
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-14928F75BC174DF9/AUTO-20261110-14928F75BC174DF9%E4%B8%BB%E5%9B%BE.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-14928F75BC174DF9/%E9%99%84%E5%9B%BE%281%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-14928F75BC174DF9/%E9%99%84%E5%9B%BE%282%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-14928F75BC174DF9/%E9%99%84%E5%9B%BE%283%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-14928F75BC174DF9/%E9%99%84%E5%9B%BE%284%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-14928F75BC174DF9/%E9%99%84%E5%9B%BE%285%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-14928F75BC174DF9/%E9%99%84%E5%9B%BE%286%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-14928F75BC174DF9/%E9%99%84%E5%9B%BE%287%29.jpg"
+        ]
+      }
+    ],
+    "source_url": "https://detail.1688.com/offer/984003393220.html",
+    "description_category_id": 17028936,
+    "type_id": 971133788
+  }
+}

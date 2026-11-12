@@ -1,0 +1,32 @@
+{
+  "target": "https://erp.wxzwxz.xyz",
+  "product": {
+    "source": "ozon-seller-center",
+    "external_id": "adce02269c7a891a1d7c5a1b94d6310f30ec6c88ea7363c77ee2e080ec29cb6c",
+    "sku": "AUTO-20261110-5ABAAA140B864D9E",
+    "name": "Елочный шар 8 см темно-бордовый 36 шт",
+    "variants": [
+      {
+        "sku": "AUTO-20261110-5ABAAA140B864D9E",
+        "specification": "AUTO-20261110-5ABAAA140B864D9E",
+        "purchase_price_cny": 28.5,
+        "package_length_mm": 200.0,
+        "package_width_mm": 200.0,
+        "package_height_mm": 200.0,
+        "weight_grams": 350.0,
+        "images": [
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-5ABAAA140B864D9E/AUTO-20261110-5ABAAA140B864D9E%E4%B8%BB%E5%9B%BE.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-5ABAAA140B864D9E/%E9%99%84%E5%9B%BE%281%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-5ABAAA140B864D9E/%E9%99%84%E5%9B%BE%282%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-5ABAAA140B864D9E/%E9%99%84%E5%9B%BE%283%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-5ABAAA140B864D9E/%E9%99%84%E5%9B%BE%284%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-5ABAAA140B864D9E/%E9%99%84%E5%9B%BE%285%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-5ABAAA140B864D9E/%E9%99%84%E5%9B%BE%286%29.jpg"
+        ]
+      }
+    ],
+    "source_url": "https://detail.1688.com/offer/922458626456.html",
+    "description_category_id": 17028733,
+    "type_id": 95421
+  }
+}

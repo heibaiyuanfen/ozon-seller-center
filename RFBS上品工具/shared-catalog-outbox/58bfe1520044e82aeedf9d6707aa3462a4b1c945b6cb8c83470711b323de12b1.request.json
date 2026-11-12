@@ -1,0 +1,27 @@
+{
+  "target": "https://erp.wxzwxz.xyz",
+  "product": {
+    "source": "ozon-seller-center",
+    "external_id": "3f01260ed51e42e0757b32e466029d15dbf43f4542586c73160bca39408fb006",
+    "sku": "AUTO-20261111-FE343217EDB84676",
+    "name": "Кубики",
+    "variants": [
+      {
+        "sku": "AUTO-20261111-FE343217EDB84676",
+        "specification": "AUTO-20261111-FE343217EDB84676",
+        "purchase_price_cny": 5.0,
+        "package_length_mm": 182.0,
+        "package_width_mm": 121.0,
+        "package_height_mm": 52.0,
+        "weight_grams": 45.0,
+        "images": [
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-11/AUTO-20261111-FE343217EDB84676/AUTO-20261111-FE343217EDB84676%E4%B8%BB%E5%9B%BE.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-11/AUTO-20261111-FE343217EDB84676/%E9%99%84%E5%9B%BE%281%29.jpg"
+        ]
+      }
+    ],
+    "source_url": "https://detail.1688.com/offer/1033772196817.html",
+    "description_category_id": 17028973,
+    "type_id": 92839
+  }
+}

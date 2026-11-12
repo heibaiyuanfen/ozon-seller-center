@@ -1,0 +1,33 @@
+{
+  "target": "https://erp.wxzwxz.xyz",
+  "product": {
+    "source": "ozon-seller-center",
+    "external_id": "d50a7cd48c4c0b7f89ed7cbe196700057bfe8e9bfb8167c5cb13d3981e63e956",
+    "sku": "AUTO-20261110-44A9C3E29C564250",
+    "name": "Елочная игрушка 50 см снеговик белый 1 шт",
+    "variants": [
+      {
+        "sku": "AUTO-20261110-44A9C3E29C564250",
+        "specification": "AUTO-20261110-44A9C3E29C564250",
+        "purchase_price_cny": 14.0,
+        "package_length_mm": 200.0,
+        "package_width_mm": 200.0,
+        "package_height_mm": 200.0,
+        "weight_grams": 228.0,
+        "images": [
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-44A9C3E29C564250/AUTO-20261110-44A9C3E29C564250%E4%B8%BB%E5%9B%BE.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-44A9C3E29C564250/%E9%99%84%E5%9B%BE%281%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-44A9C3E29C564250/%E9%99%84%E5%9B%BE%282%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-44A9C3E29C564250/%E9%99%84%E5%9B%BE%283%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-44A9C3E29C564250/%E9%99%84%E5%9B%BE%284%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-44A9C3E29C564250/%E9%99%84%E5%9B%BE%285%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-44A9C3E29C564250/%E9%99%84%E5%9B%BE%286%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-10/AUTO-20261110-44A9C3E29C564250/%E9%99%84%E5%9B%BE%287%29.jpg"
+        ]
+      }
+    ],
+    "source_url": "https://detail.1688.com/offer/1092073132383.html",
+    "description_category_id": 17028733,
+    "type_id": 95421
+  }
+}

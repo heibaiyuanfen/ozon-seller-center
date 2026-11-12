@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import base64
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -66,7 +68,7 @@ def load_seerfar_workbook(path: str | Path) -> list[dict[str, str]]:
     if not source.is_file():
         raise FileNotFoundError("Excel 文件不存在：" + str(source))
     try:
-        workbook = load_workbook(source, read_only=True, data_only=False)
+        workbook = load_workbook(source, read_only=False, data_only=False)
     except Exception as error:
         raise ValueError("无法读取 Excel 文件，请确认它是有效的 .xlsx 文档") from error
     try:
@@ -85,6 +87,22 @@ def load_seerfar_workbook(path: str | Path) -> list[dict[str, str]]:
         def cell(row, name):
             position = index.get(name)
             return row[position] if position is not None and position < len(row) else None
+
+        embedded = {}
+        for picture in sheet._images:
+            anchor = getattr(picture.anchor, '_from', None)
+            if anchor is not None:
+                embedded[(anchor.row + 1, anchor.col)] = base64.b64encode(picture._data()).decode('ascii')
+
+        def image_at(row_number, header):
+            return embedded.get((row_number, index.get(header)), '')
+
+        def link_at(row_number, header):
+            position = index.get(header)
+            if position is None:
+                return ''
+            c = sheet.cell(row_number, position + 1)
+            return _text(c.hyperlink.target) if c.hyperlink else _text(c.value)
 
         products = []
         seen = set()
@@ -106,7 +124,32 @@ def load_seerfar_workbook(path: str | Path) -> list[dict[str, str]]:
                 image_url = _text(row[image_positions[1]])
             if not image_url and image_positions:
                 image_url = _image_url_from_formula(row[image_positions[0]])
+            supplier_url = link_at(excel_row, '货源链接')
+            if supplier_url.isdigit():
+                supplier_url = 'https://detail.1688.com/offer/' + supplier_url + '.html'
+            if not supplier_url.startswith(('https://', 'http://')):
+                supplier_url = ''
+            cost = _text(cell(row, '成本合计(¥)'))
+            try:
+                amount = Decimal(cost)
+                cost = str(amount) if amount.is_finite() and amount >= 0 else ''
+            except InvalidOperation:
+                cost = ''
             products.append({
+                'enriched_source': '1' if '成本合计(¥)' in index else '',
+                'supplier_1688_url': supplier_url,
+                'purchase_cost': cost,
+                'supplier_title': _text(cell(row, '货源商品标题')),
+                'supplier_unit_price': _text(cell(row, '拿货价(¥)')),
+                'domestic_freight': _text(cell(row, '国内运费(¥)')),
+                'supplier_min_qty': _text(cell(row, '起批量')),
+                'source_confidence': _text(cell(row, '置信度')),
+                'source_match_basis': _text(cell(row, '匹配依据')),
+                'notes': _text(cell(row, '备注')),
+                'ozon_image_data': image_at(excel_row, 'OZON高清主图'),
+                'supplier_image_data': image_at(excel_row, '货源主图'),
+                'supplier_image_url': _text(cell(row, '货源主图')),
+
                 "id": identity,
                 "excel_row": str(excel_row),
                 "no": _text(cell(row, "NO.")),
@@ -151,7 +194,13 @@ def merge_product_mappings(products: list[dict], mappings: dict) -> list[dict]:
         item = dict(product)
         saved = mappings.get(str(product.get("id") or ""), {}) if isinstance(mappings, dict) else {}
         for field in MAPPING_FIELDS:
-            item[field] = _text(saved.get(field)) if isinstance(saved, dict) else ""
+            item[field] = _text(saved[field]) if isinstance(saved, dict) and field in saved else _text(item.get(field))
+        if product.get('enriched_source') == '1':
+            for field in ('supplier_1688_url', 'purchase_cost', 'notes'):
+                item[field] = _text(product.get(field))
+            item['supplier_confirmed'] = '0'
+            item['economics_confirmed'] = '0'
+            item['review_confirmed_at'] = ''
         if not item["price"]:
             item["price"] = item.get("market_price", "")
         if not item["weight"] and item.get("source_weight"):

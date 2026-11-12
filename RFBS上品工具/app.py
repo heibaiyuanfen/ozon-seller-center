@@ -861,8 +861,11 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         link = str(item.get('listing_url') or '')
         if not link and str(item.get('sku') or '').isdigit():
             link = 'https://www.ozon.ru/product/' + str(item['sku']) + '/'
+        source_actions = ttk.Frame(form)
+        source_actions.grid(row=1, column=1, sticky='e', padx=14)
+        ttk.Button(source_actions, text='双图对照', command=lambda: self._show_pool_source_comparison(item, window)).pack(side=tk.LEFT, padx=(0, 8))
         if link.startswith(('https://www.ozon.ru/', 'https://ozon.ru/')):
-            ttk.Button(form, text='打开 Ozon 商品链接', command=lambda: webbrowser.open(link)).grid(row=1, column=1, sticky='e', padx=14)
+            ttk.Button(source_actions, text='打开 Ozon 商品链接', command=lambda: webbrowser.open(link)).pack(side=tk.LEFT)
         variables = {}
         commission_label = None
         for row, field in enumerate(MAPPING_FIELDS, start=2):

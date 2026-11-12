@@ -1,0 +1,32 @@
+{
+  "target": "https://erp.wxzwxz.xyz",
+  "product": {
+    "source": "ozon-seller-center",
+    "external_id": "c88f82ed49656673acc1cf53073b3f1322d2e9d970b3c20dee0ec7799416b1de",
+    "sku": "AUTO-20261111-428E97A1BAEA4080",
+    "name": "Умная игрушка-утешитель, 3 режима, подогрев, съемный чехол, имитация маминых объятий",
+    "variants": [
+      {
+        "sku": "AUTO-20261111-428E97A1BAEA4080",
+        "specification": "AUTO-20261111-428E97A1BAEA4080",
+        "purchase_price_cny": 48.0,
+        "package_length_mm": 385.0,
+        "package_width_mm": 249.0,
+        "package_height_mm": 147.0,
+        "weight_grams": 1026.0,
+        "images": [
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-11/AUTO-20261111-428E97A1BAEA4080/AUTO-20261111-428E97A1BAEA4080%E4%B8%BB%E5%9B%BE.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-11/AUTO-20261111-428E97A1BAEA4080/%E9%99%84%E5%9B%BE%281%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-11/AUTO-20261111-428E97A1BAEA4080/%E9%99%84%E5%9B%BE%282%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-11/AUTO-20261111-428E97A1BAEA4080/%E9%99%84%E5%9B%BE%283%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-11/AUTO-20261111-428E97A1BAEA4080/%E9%99%84%E5%9B%BE%284%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-11/AUTO-20261111-428E97A1BAEA4080/%E9%99%84%E5%9B%BE%285%29.jpg",
+          "https://amzimages.oss-cn-chengdu.aliyuncs.com/rfbs-listing/2026-11-11/AUTO-20261111-428E97A1BAEA4080/%E9%99%84%E5%9B%BE%286%29.jpg"
+        ]
+      }
+    ],
+    "source_url": "https://detail.1688.com/offer/851069586174.html",
+    "description_category_id": 17028973,
+    "type_id": 92831
+  }
+}
