@@ -27,7 +27,7 @@ $SpecPath = Join-Path $ToolRoot "Ozon_RFBS上品工具.spec"
 $RuntimeDependencies = Join-Path $ToolRoot ".runtime-deps"
 
 $PythonPath = ""
-foreach ($commandName in @("python", "py")) {
+foreach ($commandName in $(if ($PythonExecutable) { @() } else { @("python", "py") })) {
     $candidate = Get-Command $commandName -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $candidate) {
         continue

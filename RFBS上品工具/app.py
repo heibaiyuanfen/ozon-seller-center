@@ -866,9 +866,35 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         ttk.Button(source_actions, text='双图对照', command=lambda: self._show_pool_source_comparison(item, window)).pack(side=tk.LEFT, padx=(0, 8))
         if link.startswith(('https://www.ozon.ru/', 'https://ozon.ru/')):
             ttk.Button(source_actions, text='打开 Ozon 商品链接', command=lambda: webbrowser.open(link)).pack(side=tk.LEFT)
+        from pool_category import resolve_pool_category
+        category_box = ttk.LabelFrame(form, text='单品类目', padding=6)
+        category_box.grid(row=2, column=0, columnspan=2, sticky='ew', padx=14, pady=6)
+        category_box.columnconfigure(1, weight=1)
+        ttk.Label(category_box, text='表格原始类目').grid(row=0, column=0, sticky='w')
+        ttk.Label(category_box, text=str(item.get('category') or '表格未填写类目'), wraplength=460).grid(row=0, column=1, sticky='w')
+        category_var = tk.StringVar(value=str(item.get('category_display') or ''))
+        ttk.Label(category_box, text='单品 Ozon 类目').grid(row=1, column=0, sticky='w')
+        category_choices = list(getattr(self, 'category_by_display', {}))
+        category_combo = ttk.Combobox(category_box, textvariable=category_var, values=category_choices, width=48)
+        category_combo.grid(row=1, column=1, sticky='ew')
+        category_status = tk.StringVar()
+        ttk.Label(category_box, textvariable=category_status, wraplength=620).grid(row=2, column=0, columnspan=2, sticky='w')
+        def update_category(*_):
+            candidate = dict(item, category_display=category_var.get().strip())
+            try:
+                resolved = resolve_pool_category(candidate, getattr(self, 'category_by_display', {}), getattr(self, 'pool_category_display', ''))
+                category_status.set('实际上架类目：' + (resolved or '未设置，请选择类目'))
+            except ValueError as error:
+                category_status.set('待核对：' + str(error))
+        def filter_categories(_event):
+            keyword = category_var.get().strip().casefold()
+            category_combo.configure(values=[v for v in category_choices if keyword in v.casefold()])
+        category_combo.bind('<KeyRelease>', filter_categories)
+        category_var.trace_add('write', update_category)
+        update_category()
         variables = {}
         commission_label = None
-        for row, field in enumerate(MAPPING_FIELDS, start=2):
+        for row, field in enumerate(MAPPING_FIELDS, start=3):
             label = ttk.Label(form, text=labels[field])
             label.grid(row=row, column=0, sticky="w", padx=14, pady=4)
             if field == 'sales_commission_percent':
@@ -883,7 +909,7 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
                 ttk.Entry(form, textvariable=variable, width=42).grid(row=row, column=1, sticky="ew", padx=(0, 14), pady=4)
         form.columnconfigure(1, weight=1)
         preview_var = tk.StringVar(value='自动售价：待填写成本、重量和核价参数')
-        ttk.Label(form, textvariable=preview_var, foreground='#245a8d').grid(row=2 + len(MAPPING_FIELDS), column=0, columnspan=2, sticky='w', padx=14, pady=4)
+        ttk.Label(form, textvariable=preview_var, foreground='#245a8d').grid(row=3 + len(MAPPING_FIELDS), column=0, columnspan=2, sticky='w', padx=14, pady=4)
         def update_preview(*_):
             try:
                 values = {key: variable.get().strip() for key, variable in variables.items()}
@@ -905,6 +931,14 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
             variables[key].trace_add('write', update_preview)
         update_preview()
         def save():
+            selected_category = category_var.get().strip()
+            if selected_category:
+                try:
+                    selected_category = resolve_pool_category(dict(item, category_display=selected_category), getattr(self, 'category_by_display', {}))
+                except ValueError as error:
+                    messagebox.showerror('单品类目待核对', str(error), parent=window)
+                    return
+            item['category_display'] = selected_category
             for field, variable in variables.items():
                 item[field] = variable.get().strip()
             self.pool_entry_defaults = {key: item[key] for key in ('old_price', 'target_roi', 'sales_commission_percent', 'label_fee', 'advertising_percent', 'cargo_loss_percent', 'depth', 'width', 'height')}
@@ -914,7 +948,7 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
             self._refresh_product_pool_tree()
             window.destroy()
         buttons = ttk.Frame(form)
-        buttons.grid(row=3 + len(MAPPING_FIELDS), column=0, columnspan=2, sticky="e", padx=14, pady=14)
+        buttons.grid(row=4 + len(MAPPING_FIELDS), column=0, columnspan=2, sticky="e", padx=14, pady=14)
         ttk.Button(buttons, text="保存", command=save).pack(side=tk.LEFT, padx=5)
         ttk.Button(buttons, text="取消", command=window.destroy).pack(side=tk.LEFT, padx=5)
 
@@ -930,8 +964,14 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         ):
             value = str(item.get(field) or "").strip()
             self._job_var(field).set(value)
-        if getattr(self, 'pool_category_display', ''):
-            self._job_var('category_display').set(self.pool_category_display)
+        from pool_category import resolve_pool_category
+        try:
+            category = resolve_pool_category(item, self.category_by_display, getattr(self, 'pool_category_display', ''))
+        except ValueError as error:
+            self._job_var('category_display').set('')
+            messagebox.showerror('单品类目待核对', str(error))
+            return
+        self._job_var('category_display').set(category)
         self._on_listing_mode_changed()
         pricing_keys = (
             "purchase_cost", "label_fee", "target_roi", "advertising_percent",

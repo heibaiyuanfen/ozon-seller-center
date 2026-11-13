@@ -263,9 +263,9 @@ class PoolReviewMixin:
         window.geometry("1150x620")
         ttk.Label(window, text=f"核价：{'FBP' if fbp else 'RFBS'}；售价按每件商品的成本和目标 ROI 自动计算。双击商品可编辑，审核后需刷新。",
                   wraplength=1100).pack(fill=tk.X, padx=12, pady=8)
-        columns = ("sku", "price", "price_rub", "cost", "profit", "roi", "margin", "status", "wb", "wb_price", "reason")
+        columns = ("sku", "category", "price", "price_rub", "cost", "profit", "roi", "margin", "status", "wb", "wb_price", "reason")
         tree = ttk.Treeview(window, columns=columns, show="headings", selectmode="extended")
-        for key, label, width in zip(columns, ("来源SKU", "自动售价 CNY", "自动售价 RUB", "到手成本 CNY", "单件利润 CNY", "ROI%", "销售利润率%", "审核状态", "WB 同步类目", "WB 售价 CNY", "说明"), (110, 110, 130, 110, 110, 70, 100, 80, 150, 100, 350)):
+        for key, label, width in zip(columns, ("来源SKU", "Ozon 上架类目", "自动售价 CNY", "自动售价 RUB", "到手成本 CNY", "单件利润 CNY", "ROI%", "销售利润率%", "审核状态", "WB 同步类目", "WB 售价 CNY", "说明"), (110, 250, 110, 130, 110, 110, 70, 100, 80, 150, 100, 350)):
             tree.heading(key, text=label)
             tree.column(key, width=width, stretch=key == "reason")
         tree.pack(fill=tk.BOTH, expand=True, padx=12)
@@ -280,7 +280,12 @@ class PoolReviewMixin:
                 wb_price = self._review_wb_inputs(item, wb)["price"] if wb else ""
             except (ValueError, ArithmeticError):
                 wb_price = "待补资料"
-            tree.insert("", tk.END, iid=str(index), values=(item.get("sku"), result["price"], result["price_rub"], item.get("purchase_cost"), result["profit"], result["roi"], result["margin"], result["status"], wb.get("subject", "关闭"), wb_price, result["reason"]))
+            from pool_category import resolve_pool_category
+            try:
+                category_text = resolve_pool_category(item, getattr(self, 'category_by_display', {}), getattr(self, 'pool_category_display', '')) or '未设置'
+            except ValueError as error:
+                category_text = '待核对：' + str(error)
+            tree.insert("", tk.END, iid=str(index), values=(item.get("sku"), category_text, result["price"], result["price_rub"], item.get("purchase_cost"), result["profit"], result["roi"], result["margin"], result["status"], wb.get("subject", "关闭"), wb_price, result["reason"]))
         self._save_product_pool()
         def edit(_event=None):
             if tree.selection():
@@ -336,6 +341,8 @@ class PoolReviewMixin:
             if not result["price"]:
                 raise ValueError(f"{item.get('sku')}: 无法计算有效售价：{result['reason']}")
             inputs = dict(base)
+            from pool_category import resolve_pool_category
+            inputs['category_display'] = resolve_pool_category(item, getattr(self, 'category_by_display', {}), getattr(self, 'pool_category_display', ''))
             # Only shop/category/warehouse/image settings come from the workbench.
             for key in ("offer_id", "model_name", "purchase_cost", "old_price", "sales_commission_percent", "net_weight", "weight", "depth", "width", "height", "stock", "supplier_1688_url"):
                 inputs[key] = str(item.get(key) or ("0" if key == "old_price" else ""))
@@ -387,7 +394,7 @@ class PoolReviewMixin:
         except Exception as error:
             messagebox.showerror("整批未入队，请修正后重试", str(error), parent=parent)
             return
-        lines = "\n".join(f"{job['inputs']['ozon_shop_name']} | {job['inputs']['source_url']} | {job['inputs']['offer_id']} | {job['inputs']['price']} CNY | 仓库 {job['inputs']['warehouse_id']} | 选品提示：{job['inputs']['pool_review'].get('status')} {job['inputs']['pool_review'].get('reason', '')}" for job in jobs)
+        lines = "\n".join(f"{job['inputs']['ozon_shop_name']} | {job['inputs']['source_url']} | {job['inputs']['offer_id']} | {job['inputs']['price']} CNY | 类目 {job['inputs']['category_display']} | 仓库 {job['inputs']['warehouse_id']} | 选品提示：{job['inputs']['pool_review'].get('status')} {job['inputs']['pool_review'].get('reason', '')}" for job in jobs)
         preview = tk.Toplevel(parent)
         preview.title("最终确认：将真实上架")
         text = tk.Text(preview, width=110, height=22, wrap="word")
