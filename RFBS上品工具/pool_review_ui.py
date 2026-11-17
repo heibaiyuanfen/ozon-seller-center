@@ -5,7 +5,7 @@ import time
 import uuid
 import tkinter as tk
 from tkinter import ttk, messagebox
-from pool_review import DEFAULT_RULES, validate_rules, evaluate_product, pricing_values, source_identity, read_listing_history
+from pool_review import DEFAULT_RULES, POOL_OZON_STOCK, validate_rules, evaluate_product, pricing_values, source_identity, read_listing_history
 
 
 class PoolReviewMixin:
@@ -344,9 +344,10 @@ class PoolReviewMixin:
             from pool_category import resolve_pool_category
             inputs['category_display'] = resolve_pool_category(item, getattr(self, 'category_by_display', {}), getattr(self, 'pool_category_display', ''))
             # Only shop/category/warehouse/image settings come from the workbench.
-            for key in ("offer_id", "model_name", "purchase_cost", "old_price", "sales_commission_percent", "net_weight", "weight", "depth", "width", "height", "stock", "supplier_1688_url"):
+            for key in ("offer_id", "model_name", "purchase_cost", "old_price", "sales_commission_percent", "net_weight", "weight", "depth", "width", "height", "supplier_1688_url"):
                 inputs[key] = str(item.get(key) or ("0" if key == "old_price" else ""))
             inputs.update(pricing_values(item, rules, fbp))
+            inputs["stock"] = POOL_OZON_STOCK
             inputs.update(listing_mode="follow", source_url=str(item.get("listing_url") or item.get("sku") or ""),
                 local_image_paths=[], amazon_generate_main="0", amazon_source="", price=result["price"],
                 pool_source_identity=source_identity(item), pool_review=copy.deepcopy(item.get("review_result") or {}),

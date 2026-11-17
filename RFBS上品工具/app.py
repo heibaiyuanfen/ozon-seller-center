@@ -40,6 +40,7 @@ from runtime_paths import APP_DATA_DIR
 from wb_ui import WbUiMixin
 from amazon_source import download_amazon_images, scrape_amazon_product
 from seerfar_import import MAPPING_FIELDS, load_seerfar_workbook, mapping_payload, merge_product_mappings
+from pool_review import POOL_OZON_STOCK
 from pool_review_ui import PoolReviewMixin
 
 
@@ -853,7 +854,6 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         }
         defaults = {
             "target_roi": "60", "old_price": "0", "sales_commission_percent": "",
-            "stock": "1",
         }
         defaults.update(getattr(self, 'pool_entry_defaults', {}))
         defaults['offer_id'] = self._new_offer_id()
@@ -899,11 +899,12 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
             label.grid(row=row, column=0, sticky="w", padx=14, pady=4)
             if field == 'sales_commission_percent':
                 commission_label = label
-            variable = tk.StringVar(value=str(item.get(field) or defaults.get(field, "")))
+            value = POOL_OZON_STOCK if field == "stock" else str(item.get(field) or defaults.get(field, ""))
+            variable = tk.StringVar(value=value)
             variables[field] = variable
             if field in {"supplier_confirmed", "economics_confirmed"}:
                 ttk.Checkbutton(form, variable=variable, onvalue="1", offvalue="0").grid(row=row, column=1, sticky="w", padx=8)
-            elif field == "review_confirmed_at":
+            elif field in {"stock", "review_confirmed_at"}:
                 ttk.Label(form, textvariable=variable).grid(row=row, column=1, sticky="w")
             else:
                 ttk.Entry(form, textvariable=variable, width=42).grid(row=row, column=1, sticky="ew", padx=(0, 14), pady=4)
@@ -960,10 +961,11 @@ class RfbsListingApp(PoolReviewMixin, WbUiMixin):
         self._job_var("source_url").set(str(item.get("listing_url") or item.get("sku") or ""))
         for field in (
             "supplier_1688_url", "offer_id", "model_name", "purchase_cost", "price", "old_price",
-            "target_roi", "sales_commission_percent", "label_fee", "advertising_percent", "cargo_loss_percent", "net_weight", "weight", "depth", "width", "height", "stock",
+            "target_roi", "sales_commission_percent", "label_fee", "advertising_percent", "cargo_loss_percent", "net_weight", "weight", "depth", "width", "height",
         ):
             value = str(item.get(field) or "").strip()
             self._job_var(field).set(value)
+        self._job_var("stock").set(POOL_OZON_STOCK)
         from pool_category import resolve_pool_category
         try:
             category = resolve_pool_category(item, self.category_by_display, getattr(self, 'pool_category_display', ''))

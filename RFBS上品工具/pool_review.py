@@ -4,6 +4,8 @@ from datetime import datetime
 from pathlib import Path
 from core import calculate_price_breakdown, calculate_roi_price, calculate_shipping, extract_reference_article
 
+POOL_OZON_STOCK = "1000"
+
 DEFAULT_RULES = {
     "category_keyword": "", "min_sales": "100", "sales_period_days": "30",
     "min_price": "", "max_price": "", "max_weight": "",
